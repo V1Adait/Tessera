@@ -28,8 +28,8 @@ class Delta(BaseModel):
 
 
 class Done(BaseModel):
+    type: Literal["done"] = "done"
     usage: Usage
-    text: str
 
 
 StreamEvent = Delta | Done

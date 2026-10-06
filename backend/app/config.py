@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     max_tokens_ceiling: int
     default_max_tokens: int
     request_timeout: float
+    default_temperature: float | None = None
 
     def key_for(self, provider: Provider) -> str | None:
         return getattr(self, f"{provider}_api_key")
@@ -33,7 +34,7 @@ class Settings(BaseSettings):
                 )
             return self
 
-        # No explicit choice: first provider with a key, in PROVIDER_ORDER.
+        # No explicit choice: first provider wi#th a key, in PROVIDER_ORDER.
         for candidate in PROVIDER_ORDER:
             if self.key_for(candidate):
                 self.provider = candidate

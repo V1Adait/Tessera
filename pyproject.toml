@@ -1,0 +1,30 @@
+[project]
+name = "tessera"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "anthropic>=1.11.0",
+    "fastapi>=0.142.2",
+    "langchain>=1.4.3",
+    "langchain-anthropic>=1.7.5",
+    "langchain-openai>=1.6.7",
+    "langchain-openrouter>=0.2.9",
+    "langgraph>=1.2.13",
+    "openai>=3.24.0",
+    "pydantic-settings>=2.15.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
+]
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
