@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from uuid import UUID, uuid4
 from typing import Literal
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, Field
 
 
 class Message(BaseModel):
@@ -29,7 +30,29 @@ class Delta(BaseModel):
 
 class Done(BaseModel):
     type: Literal["done"] = "done"
+    request_id: UUID
     usage: Usage
 
 
-StreamEvent = Delta | Done
+ErrorCode = Literal[
+    "auth",  # bad or missing provider key
+    "model_not_found",  # invalid model name
+    "rate_limited",
+    "timeout",
+    "unavailable",  # network failure or provider 5xx
+    "bad_request",
+    "unknown",
+]
+
+
+class ErrorEvent(BaseModel):
+    """Terminal event: the stream ended in failure. Safe to show to a client."""
+
+    type: Literal["error"] = "error"
+    request_id: UUID
+    code: ErrorCode
+    message: str
+    retryable: bool
+
+
+StreamEvent = Delta | Done | ErrorEvent

@@ -9,7 +9,9 @@ PROVIDER_ORDER: tuple[Provider, ...] = ("anthropic", "openai", "openrouter")
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env",)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+    )
 
     provider: Provider | None = None
     default_model: str
@@ -19,13 +21,14 @@ class Settings(BaseSettings):
     max_tokens_ceiling: int
     default_max_tokens: int
     request_timeout: float
+    max_retries: int = 2
     default_temperature: float | None = None
 
     def key_for(self, provider: Provider) -> str | None:
         return getattr(self, f"{provider}_api_key")
 
     @model_validator(mode="after")
-    def resolve_provider(self) -> "Settings":
+    def resolve_provider(self) -> Settings:
         if self.provider is not None:
             # Explicit choice: its key must exist, no silent fallback.
             if not self.key_for(self.provider):
@@ -46,4 +49,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    # Required fields are filled from env/.env at runtime, which mypy can't see.
+    return Settings()  # type: ignore[call-arg]
