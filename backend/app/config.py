@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     default_max_tokens: int
     request_timeout: float
     max_retries: int = 2
+    max_context_tokens: int = 100_000  # model window we allow ourselves, input + reply
+    summarize_at: float = 0.7  # fraction of the input budget that triggers a summary
+    recent_turns: int = 3  # turns kept word for word when a summary runs
     default_temperature: float | None = None
 
     def key_for(self, provider: Provider) -> str | None:
