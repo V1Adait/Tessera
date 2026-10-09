@@ -41,6 +41,7 @@ ErrorCode = Literal[
     "timeout",
     "unavailable",  # network failure or provider 5xx
     "bad_request",
+    "context_too_large",  # the prompt cannot fit the window even after trimming history
     "unknown",
 ]
 

@@ -23,6 +23,11 @@ from backend.app.llm import stream_chat, to_lc_messages
 from backend.app.models import ChatRequest, Delta, Done, ErrorEvent, Message
 
 
+def prompt() -> list[BaseMessage]:
+    """A finished prompt, as build_context would hand it to stream_chat."""
+    return to_lc_messages(make_request())
+
+
 def make_request(**kwargs) -> ChatRequest:
     return ChatRequest(messages=[Message(role="user", content="hi")], **kwargs)
 
@@ -95,7 +100,7 @@ def test_to_lc_messages_maps_system_role_in_list():
 
 
 async def test_stream_chat_yields_deltas_then_done():
-    events = [e async for e in stream_chat(make_request(), ProviderLikeFake())]
+    events = [e async for e in stream_chat(prompt(), ProviderLikeFake())]
 
     assert isinstance(events[-1], Done)
     assert all(isinstance(e, Delta) for e in events[:-1])
@@ -103,7 +108,7 @@ async def test_stream_chat_yields_deltas_then_done():
 
 
 async def test_stream_chat_reports_usage_from_late_empty_chunk():
-    events = [e async for e in stream_chat(make_request(), ProviderLikeFake())]
+    events = [e async for e in stream_chat(prompt(), ProviderLikeFake())]
     done = events[-1]
 
     assert isinstance(done, Done)
@@ -112,7 +117,7 @@ async def test_stream_chat_reports_usage_from_late_empty_chunk():
 
 
 async def test_stream_chat_skips_empty_chunks():
-    events = [e async for e in stream_chat(make_request(), ProviderLikeFake())]
+    events = [e async for e in stream_chat(prompt(), ProviderLikeFake())]
 
     assert all(e.text for e in events if isinstance(e, Delta))
 
@@ -121,7 +126,7 @@ async def test_stream_chat_missing_usage_warns_and_reports_zeros(caplog):
     llm = fake_llm(AIMessage(content="hello"))
 
     with caplog.at_level(logging.WARNING):
-        events = [e async for e in stream_chat(make_request(), llm)]
+        events = [e async for e in stream_chat(prompt(), llm)]
     done = events[-1]
 
     assert isinstance(done, Done)
@@ -188,7 +193,7 @@ class FailingFake(BaseChatModel):
     ],
 )
 async def test_provider_errors_become_error_events(exc, code, retryable):
-    events = [e async for e in stream_chat(make_request(), FailingFake(exc=exc))]
+    events = [e async for e in stream_chat(prompt(), FailingFake(exc=exc))]
 
     assert len(events) == 1
     event = events[0]
@@ -203,7 +208,7 @@ async def test_provider_errors_become_error_events(exc, code, retryable):
 async def test_error_after_partial_text_keeps_deltas_then_error():
     llm = FailingFake(exc=RuntimeError("dropped"), after_text="partial")
 
-    events = [e async for e in stream_chat(make_request(), llm)]
+    events = [e async for e in stream_chat(prompt(), llm)]
 
     assert isinstance(events[0], Delta)
     assert isinstance(events[-1], ErrorEvent)
@@ -213,11 +218,10 @@ async def test_error_after_partial_text_keeps_deltas_then_error():
 async def test_request_id_is_passed_through_and_generated():
     fixed = uuid4()
     events = [
-        e
-        async for e in stream_chat(make_request(), ProviderLikeFake(), request_id=fixed)
+        e async for e in stream_chat(prompt(), ProviderLikeFake(), request_id=fixed)
     ]
     assert events[-1].request_id == fixed
 
-    generated = [e async for e in stream_chat(make_request(), ProviderLikeFake())]
+    generated = [e async for e in stream_chat(prompt(), ProviderLikeFake())]
     assert isinstance(generated[-1].request_id, UUID)
     assert generated[-1].request_id != fixed

@@ -1,5 +1,6 @@
 import logging
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from uuid import UUID, uuid4
 
 import anthropic
@@ -11,7 +12,7 @@ from langchain_core.messages.ai import UsageMetadata
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from backend.app.config import Settings
+from backend.app.config import Settings, get_settings
 from backend.app.models import (
     ChatRequest,
     Delta,
@@ -69,6 +70,12 @@ def get_llm(settings: Settings) -> BaseChatModel:
     raise NotImplementedError(f"provider {settings.provider!r} not wired yet")
 
 
+@lru_cache
+def get_default_llm() -> BaseChatModel:
+    """The shared model client, built once from the settings and reused by every request."""
+    return get_llm(get_settings())
+
+
 def to_lc_messages(request: ChatRequest) -> list[BaseMessage]:
     """Convert our ChatRequest into LangChain messages."""
     role_to_class: dict[str, type[BaseMessage]] = {
@@ -115,14 +122,14 @@ def classify_error(exc: Exception) -> tuple[ErrorCode, str, bool]:
 
 
 async def stream_chat(
-    request: ChatRequest, llm: BaseChatModel, request_id: UUID | None = None
+    messages: list[BaseMessage], llm: BaseChatModel, request_id: UUID | None = None
 ) -> AsyncIterator[StreamEvent]:
-    """ChatRequest in, Delta events then one Done (or one ErrorEvent) out. Our types, not LangChain's."""
+    """Finished prompt in (from build_context), Delta events then one Done or ErrorEvent out."""
     request_id = request_id or uuid4()
     usage: UsageMetadata | None = None
 
     try:
-        async for chunk in llm.astream(to_lc_messages(request)):
+        async for chunk in llm.astream(messages):
             text = str(
                 chunk.text
             )  # plain text whether content is a str or a list of blocks
