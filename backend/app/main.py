@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router
+from backend.app.api_workspaces import router as workspaces_router
 from backend.app.config import get_settings
 from backend.app.db.migrate import pending_migrations
 from backend.app.db.pool import create_pool
@@ -61,3 +62,4 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(workspaces_router)

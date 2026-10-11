@@ -40,6 +40,7 @@ def sse(event: StreamEvent) -> str:
 
 class ConversationView(BaseModel):
     id: UUID
+    workspace_id: UUID
     title: str | None
     messages: list[StoredMessage]
 
@@ -67,10 +68,12 @@ async def chat(
     request_id = uuid4()
     try:
         turn = await chat_service.begin_turn(
-            pool, body.conversation_id, body.message, request_id
+            pool, body.conversation_id, body.message, request_id, body.workspace_id
         )
     except chat_service.ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="conversation not found") from None
+    except chat_service.WorkspaceNotFoundError:
+        raise HTTPException(status_code=404, detail="workspace not found") from None
 
     async def events() -> AsyncIterator[str]:
         try:
@@ -109,5 +112,8 @@ async def get_conversation(conversation_id: UUID, pool: PoolDep) -> Conversation
         raise HTTPException(status_code=404, detail="conversation not found")
     messages = await repo.list_messages(pool, conversation_id)
     return ConversationView(
-        id=conversation.id, title=conversation.title, messages=messages
+        id=conversation.id,
+        workspace_id=conversation.workspace_id,
+        title=conversation.title,
+        messages=messages,
     )

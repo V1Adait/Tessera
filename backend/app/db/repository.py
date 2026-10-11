@@ -15,12 +15,14 @@ from asyncpg.pool import PoolConnectionProxy
 
 from backend.app.db.records import (
     ConversationRecord,
+    EntityRecord,
     MessageRole,
     MessageStatus,
     StoredMessage,
     StoredSummary,
     TraceRecord,
     TrimEvent,
+    WorkspaceRecord,
 )
 
 Db = asyncpg.Connection | asyncpg.Pool | PoolConnectionProxy
@@ -28,17 +30,104 @@ Db = asyncpg.Connection | asyncpg.Pool | PoolConnectionProxy
 # --- conversations ----------------------------------------------------------------------
 
 
-async def create_conversation(db: Db, title: str | None = None) -> UUID:
+class DuplicateNameError(ValueError):
+    """An entity with this name (ignoring case) already exists in the workspace."""
+
+
+class WorkspaceNotFoundError(LookupError):
+    """The workspace does not exist."""
+
+
+# --- workspaces and entities ------------------------------------------------------------
+
+
+async def create_workspace(db: Db, name: str) -> WorkspaceRecord:
     row = await db.fetchrow(
-        "INSERT INTO conversations (title) VALUES ($1) RETURNING id", title
+        "INSERT INTO workspaces (name) VALUES ($1) "
+        "RETURNING id, name, created_at, updated_at",
+        name.strip(),
     )
+    assert row is not None
+    return WorkspaceRecord(**dict(row))
+
+
+async def list_workspaces(db: Db) -> list[WorkspaceRecord]:
+    rows = await db.fetch(
+        "SELECT id, name, created_at, updated_at FROM workspaces ORDER BY created_at, id"
+    )
+    return [WorkspaceRecord(**dict(r)) for r in rows]
+
+
+async def get_workspace(db: Db, workspace_id: UUID) -> WorkspaceRecord | None:
+    row = await db.fetchrow(
+        "SELECT id, name, created_at, updated_at FROM workspaces WHERE id = $1",
+        workspace_id,
+    )
+    return WorkspaceRecord(**dict(row)) if row else None
+
+
+async def create_entity(db: Db, workspace_id: UUID, name: str) -> EntityRecord:
+    """Add a row to the matrix. Raises WorkspaceNotFoundError or DuplicateNameError."""
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO entities (workspace_id, name) VALUES ($1, $2)
+            RETURNING id, workspace_id, name, position, created_at
+            """,
+            workspace_id,
+            name.strip(),
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise DuplicateNameError(name) from exc
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise WorkspaceNotFoundError(str(workspace_id)) from exc
+    assert row is not None
+    return EntityRecord(**dict(row))
+
+
+async def list_entities(db: Db, workspace_id: UUID) -> list[EntityRecord]:
+    rows = await db.fetch(
+        """
+        SELECT id, workspace_id, name, position, created_at
+        FROM entities WHERE workspace_id = $1 ORDER BY position
+        """,
+        workspace_id,
+    )
+    return [EntityRecord(**dict(r)) for r in rows]
+
+
+# --- conversations ----------------------------------------------------------------------
+
+
+async def create_conversation(
+    db: Db, title: str | None = None, workspace_id: UUID | None = None
+) -> UUID:
+    """New conversation in `workspace_id`, or in the default (oldest) workspace when None.
+
+    Raises WorkspaceNotFoundError for an unknown workspace.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO conversations (title, workspace_id)
+            VALUES ($1, COALESCE($2::uuid, (SELECT id FROM workspaces ORDER BY created_at, id LIMIT 1)))
+            RETURNING id
+            """,
+            title,
+            workspace_id,
+        )
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise WorkspaceNotFoundError(str(workspace_id)) from exc
     assert row is not None
     return row["id"]
 
 
 async def get_conversation(db: Db, conversation_id: UUID) -> ConversationRecord | None:
     row = await db.fetchrow(
-        "SELECT id, title, created_at, updated_at FROM conversations WHERE id = $1",
+        """
+        SELECT id, workspace_id, title, created_at, updated_at
+        FROM conversations WHERE id = $1
+        """,
         conversation_id,
     )
     return ConversationRecord(**dict(row)) if row else None

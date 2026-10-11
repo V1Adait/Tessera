@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Message(BaseModel):
@@ -23,6 +23,9 @@ class ChatInput(BaseModel):
     client cannot forge earlier turns or send system messages."""
 
     conversation_id: UUID | None = None  # None starts a new conversation
+    # Which workspace a NEW conversation belongs to (None: the default workspace). An existing
+    # conversation already has one, so sending both is rejected as ambiguous.
+    workspace_id: UUID | None = None
     message: str = Field(min_length=1, max_length=20_000)
 
     @field_validator("message")
@@ -31,6 +34,40 @@ class ChatInput(BaseModel):
         if not value.strip():
             raise ValueError("message must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def one_of_conversation_or_workspace(self) -> ChatInput:
+        if self.conversation_id is not None and self.workspace_id is not None:
+            raise ValueError("send conversation_id or workspace_id, not both")
+        return self
+
+
+def _clean_name(value: str) -> str:
+    """Names are stored trimmed, with no control characters and no blanks."""
+    value = value.strip()
+    if not value:
+        raise ValueError("name must not be blank")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError("name must not contain control characters")
+    return value
+
+
+class NewWorkspace(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def clean(cls, value: str) -> str:
+        return _clean_name(value)
+
+
+class NewEntity(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def clean(cls, value: str) -> str:
+        return _clean_name(value)
 
 
 class Usage(BaseModel):

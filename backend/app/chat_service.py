@@ -50,6 +50,10 @@ class ConversationNotFoundError(LookupError):
     """The client named a conversation that does not exist."""
 
 
+class WorkspaceNotFoundError(LookupError):
+    """The client named a workspace that does not exist."""
+
+
 @dataclass(frozen=True)
 class Turn:
     """Everything stream_turn needs, prepared by begin_turn."""
@@ -63,14 +67,23 @@ class Turn:
 
 
 async def begin_turn(
-    pool: asyncpg.Pool, conversation_id: UUID | None, text: str, request_id: UUID
+    pool: asyncpg.Pool,
+    conversation_id: UUID | None,
+    text: str,
+    request_id: UUID,
+    workspace_id: UUID | None = None,
 ) -> Turn:
-    """Store the user's message (creating the conversation if needed) and load the history."""
+    """Store the user's message (creating the conversation if needed) and load the history.
+
+    `workspace_id` only matters for a NEW conversation (None means the default workspace)."""
     async with pool.acquire() as conn, conn.transaction():
         if conversation_id is None:
-            conversation_id = await repo.create_conversation(
-                conn, title=text.strip()[:60]
-            )
+            try:
+                conversation_id = await repo.create_conversation(
+                    conn, title=text.strip()[:60], workspace_id=workspace_id
+                )
+            except repo.WorkspaceNotFoundError as exc:
+                raise WorkspaceNotFoundError(str(workspace_id)) from exc
         try:
             await repo.add_message(
                 conn, conversation_id, "user", text, request_id=request_id

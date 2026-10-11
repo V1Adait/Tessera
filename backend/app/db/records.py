@@ -13,8 +13,26 @@ TraceKind = Literal["chat", "summary"]
 TraceStatus = Literal["ok", "error", "rejected", "cancelled"]
 
 
+class WorkspaceRecord(BaseModel):
+    id: UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class EntityRecord(BaseModel):
+    """One row of the matrix: a company, vendor or case."""
+
+    id: UUID
+    workspace_id: UUID
+    name: str
+    position: int
+    created_at: datetime
+
+
 class ConversationRecord(BaseModel):
     id: UUID
+    workspace_id: UUID
     title: str | None
     created_at: datetime
     updated_at: datetime
