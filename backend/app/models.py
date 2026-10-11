@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Message(BaseModel):
@@ -16,6 +16,21 @@ class ChatRequest(BaseModel):
     messages: list[Message] = Field(min_length=1)
     max_tokens: int | None = None
     temperature: float | None = None
+
+
+class ChatInput(BaseModel):
+    """What a client sends to POST /chat: ONE new message. The server owns the history, so the
+    client cannot forge earlier turns or send system messages."""
+
+    conversation_id: UUID | None = None  # None starts a new conversation
+    message: str = Field(min_length=1, max_length=20_000)
+
+    @field_validator("message")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message must not be blank")
+        return value
 
 
 class Usage(BaseModel):

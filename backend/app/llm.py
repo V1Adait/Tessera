@@ -12,7 +12,7 @@ from langchain_core.messages.ai import UsageMetadata
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from backend.app.config import Settings, get_settings
+from backend.app.config import Provider, Settings, get_settings
 from backend.app.models import (
     ChatRequest,
     Delta,
@@ -26,54 +26,88 @@ from backend.app.models import (
 logger = logging.getLogger(__name__)
 
 
-def get_llm(settings: Settings) -> BaseChatModel:
+def get_llm(
+    settings: Settings,
+    *,
+    provider: Provider | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+) -> BaseChatModel:
+    """Build a chat model. With no overrides it is the main chat model from the settings; the
+    keyword arguments let another task (such as summarising) use a different model."""
     # The validator in Settings guarantees a provider is set; this narrows the type for mypy.
-    assert settings.provider is not None
-    raw_key = settings.key_for(settings.provider)
-    assert raw_key  # the Settings validator guarantees the active provider has a key
+    chosen = provider or settings.provider
+    assert chosen is not None
+    raw_key = settings.key_for(chosen)
+    if not raw_key:
+        raise ValueError(f"no API key for provider {chosen!r}")
     api_key = SecretStr(raw_key)
+    model_name = model or settings.default_model
+    token_cap = max_tokens or settings.default_max_tokens
+    temp = temperature if temperature is not None else settings.default_temperature
 
-    if settings.provider == "anthropic":
+    if chosen == "anthropic":
         # `model` and `max_tokens` are aliases that mypy's plugin doesn't see; checked at runtime.
         return ChatAnthropic(  # type: ignore[call-arg]
-            model=settings.default_model,
+            model=model_name,
             api_key=api_key,
-            max_tokens=settings.default_max_tokens,
+            max_tokens=token_cap,
             timeout=settings.request_timeout,
             max_retries=settings.max_retries,
-            temperature=settings.default_temperature,
+            temperature=temp,
         )
 
-    if settings.provider == "openai":
+    if chosen == "openai":
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=settings.default_model,
+            model=model_name,
             api_key=api_key,
-            max_tokens=settings.default_max_tokens,
+            max_tokens=token_cap,
             timeout=settings.request_timeout,
             max_retries=settings.max_retries,
-            temperature=settings.default_temperature,
+            temperature=temp,
             stream_usage=True,
         )
 
-    if settings.provider == "openrouter":
+    if chosen == "openrouter":
         return ChatOpenAI(  # type: ignore[call-arg]
-            model=settings.default_model,
+            model=model_name,
             api_key=api_key,
-            max_tokens=settings.default_max_tokens,
+            max_tokens=token_cap,
             timeout=settings.request_timeout,
             max_retries=settings.max_retries,
-            temperature=settings.default_temperature,
+            temperature=temp,
             base_url="https://openrouter.ai/api/v1",
             stream_usage=True,
         )
 
-    raise NotImplementedError(f"provider {settings.provider!r} not wired yet")
+    raise NotImplementedError(f"provider {chosen!r} not wired yet")
 
 
 @lru_cache
 def get_default_llm() -> BaseChatModel:
     """The shared model client, built once from the settings and reused by every request."""
     return get_llm(get_settings())
+
+
+@lru_cache
+def get_summary_llm() -> BaseChatModel | None:
+    """The cheap model that writes conversation summaries, or None when its provider has no
+    key (summaries are then simply switched off, and chat keeps working)."""
+    settings = get_settings()
+    if not settings.key_for(settings.summary_provider):
+        logger.warning(
+            "no API key for summary provider %r: conversation summaries are off",
+            settings.summary_provider,
+        )
+        return None
+    return get_llm(
+        settings,
+        provider=settings.summary_provider,
+        model=settings.summary_model,
+        max_tokens=settings.summary_max_tokens,
+        temperature=0.2,  # summaries should be stable, not creative
+    )
 
 
 def to_lc_messages(request: ChatRequest) -> list[BaseMessage]:

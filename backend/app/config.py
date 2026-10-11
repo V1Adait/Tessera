@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     summarize_at: float = 0.7  # fraction of the input budget that triggers a summary
     recent_turns: int = 3  # turns kept word for word when a summary runs
     default_temperature: float | None = None
+    database_url: str | None = (
+        None  # e.g. postgresql://user:password@localhost:5432/tessera
+    )
+
+    # Conversation summaries: a cheap model, called after a turn, never in the user's way.
+    summary_provider: Provider = "openrouter"
+    summary_model: str = "anthropic/claude-haiku-5.5"
+    summary_max_tokens: int = 600  # hard cap on the summary the model may write
+    summary_input_max_tokens: int = 60_000  # most history folded in by one summary call
 
     def key_for(self, provider: Provider) -> str | None:
         return getattr(self, f"{provider}_api_key")

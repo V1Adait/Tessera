@@ -11,6 +11,7 @@ We trim what we SEND, never what we store. Everything here is a pure function of
 """
 
 import math
+from dataclasses import dataclass
 from uuid import UUID
 
 from langchain_core.messages import BaseMessage, SystemMessage
@@ -122,7 +123,23 @@ def _system_text(profile: str | None, summary: str | None) -> str:
     return "\n\n".join(parts)
 
 
-def build_context(
+@dataclass(frozen=True)
+class TrimInfo:
+    """History that trim_history had to drop from what we SEND (the emergency brake fired)."""
+
+    messages_dropped: int
+    tokens_dropped: int
+    budget_tokens: int
+    dropped_through_message_id: UUID | None
+
+
+@dataclass(frozen=True)
+class BuiltContext:
+    messages: list[BaseMessage]
+    trim: TrimInfo | None  # None when nothing was dropped (the normal case)
+
+
+def assemble_context(
     request: ChatRequest,
     settings: Settings,
     *,
@@ -130,8 +147,9 @@ def build_context(
     summary: str | None = None,
     documents: str | None = None,
     summarised_through: UUID | None = None,
-) -> list[BaseMessage]:
-    """Assemble the final prompt. `request.system` is ignored: only the server's prompt counts."""
+) -> BuiltContext:
+    """Assemble the final prompt and report any trimming. `request.system` is ignored:
+    only the server's prompt counts."""
     *history, new = request.messages
     if new.role != "user":
         raise ValueError("the last message must be from the user")
@@ -157,7 +175,41 @@ def build_context(
         )
 
     kept = trim_history(history, history_budget)
+    dropped = history[: len(history) - len(kept)]  # kept is always the newest part
+    trim = (
+        TrimInfo(
+            messages_dropped=len(dropped),
+            tokens_dropped=sum(message_tokens(m) for m in dropped),
+            budget_tokens=history_budget,
+            dropped_through_message_id=dropped[-1].id,
+        )
+        if dropped
+        else None
+    )
+
     converted = to_lc_messages(
         ChatRequest(messages=[*kept, Message(role="user", content=new_text)])
     )
-    return [SystemMessage(content=system_text), *converted]
+    return BuiltContext(
+        messages=[SystemMessage(content=system_text), *converted], trim=trim
+    )
+
+
+def build_context(
+    request: ChatRequest,
+    settings: Settings,
+    *,
+    profile: str | None = None,
+    summary: str | None = None,
+    documents: str | None = None,
+    summarised_through: UUID | None = None,
+) -> list[BaseMessage]:
+    """The prompt only. Use assemble_context when you also need to know what was trimmed."""
+    return assemble_context(
+        request,
+        settings,
+        profile=profile,
+        summary=summary,
+        documents=documents,
+        summarised_through=summarised_through,
+    ).messages

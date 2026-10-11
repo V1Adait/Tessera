@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router
 from backend.app.config import get_settings
+from backend.app.db.migrate import pending_migrations
+from backend.app.db.pool import create_pool
 from backend.app.llm import get_default_llm
 
 logging.basicConfig(
@@ -18,14 +20,33 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Fail fast: a bad .env or model setup stops the server at startup,
+    # Fail fast: a bad .env, model setup or database stops the server at startup,
     # not on the first user request.
+    log = logging.getLogger(__name__)
     settings = get_settings()
     get_default_llm()
-    logging.getLogger(__name__).info(
-        "started: provider=%s model=%s", settings.provider, settings.default_model
-    )
-    yield
+    log.info("started: provider=%s model=%s", settings.provider, settings.default_model)
+
+    app.state.pool = None
+    if settings.database_url:
+        pool = await create_pool(settings)
+        pending = await pending_migrations(pool)
+        if pending:
+            await pool.close()
+            raise RuntimeError(
+                f"database needs migrations: {', '.join(pending)}. "
+                "Run: uv run python -m backend.app.db.migrate"
+            )
+        app.state.pool = pool
+        log.info("database pool ready")
+    else:
+        log.warning("DATABASE_URL is not set: running without persistence")
+
+    try:
+        yield
+    finally:
+        if app.state.pool is not None:
+            await app.state.pool.close()
 
 
 app = FastAPI(title="Tessera", lifespan=lifespan)
@@ -36,7 +57,7 @@ app.add_middleware(
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
+    expose_headers=["X-Request-ID", "X-Conversation-ID"],
 )
 
 app.include_router(router)

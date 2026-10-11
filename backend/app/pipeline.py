@@ -8,13 +8,13 @@ tracing and error handling attach later. It knows nothing about HTTP.
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from uuid import UUID, uuid4
 
 from langchain_core.language_models import BaseChatModel
 
 from backend.app.config import Settings
-from backend.app.context import ContextTooLargeError, build_context
+from backend.app.context import BuiltContext, ContextTooLargeError, assemble_context
 from backend.app.llm import stream_chat
 from backend.app.models import ChatRequest, ErrorEvent, StreamEvent
 
@@ -41,10 +41,14 @@ async def run(
     settings: Settings,
     llm: BaseChatModel,
     request_id: UUID | None = None,
+    on_context: Callable[[BuiltContext], None] | None = None,
+    summary: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """ChatRequest in, a stream of Delta events then one Done (or one ErrorEvent) out.
 
     The llm and settings come in as arguments, not fetched here, so tests can pass fakes.
+    `on_context` is told what was sent (and what was trimmed) once the prompt is built, so a
+    caller can record it without the pipeline knowing about databases.
     Failures end the stream with an ErrorEvent; they never raise to the caller.
     """
     request_id = request_id or uuid4()
@@ -52,7 +56,7 @@ async def run(
     check_input(request, settings)
 
     try:
-        messages = build_context(request, settings)
+        built = assemble_context(request, settings, summary=summary)
     except ContextTooLargeError:
         logger.warning("context too large", extra={"request_id": str(request_id)})
         yield ErrorEvent(
@@ -73,5 +77,8 @@ async def run(
         )
         return
 
-    async for event in stream_chat(messages, llm, request_id):
+    if on_context is not None:
+        on_context(built)
+
+    async for event in stream_chat(built.messages, llm, request_id):
         yield check_output(event)
