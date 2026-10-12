@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "anthropic>=1.11.0",
     "asyncpg>=0.32.0",
+    "beautifulsoup4>=4.15.0",
     "fastapi>=0.142.2",
     "langchain>=1.4.3",
     "langchain-anthropic>=1.7.5",
@@ -14,7 +15,12 @@ dependencies = [
     "langchain-openrouter>=0.2.9",
     "langgraph>=1.2.13",
     "openai>=3.24.0",
+    "openpyxl>=3.1.5",
+    "pdfplumber>=0.11.10",
     "pydantic-settings>=2.15.0",
+    "python-docx>=1.2.0",
+    "python-multipart>=0.0.32",
+    "python-pptx>=1.0.2",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -23,10 +29,17 @@ dev = [
     "asyncpg-stubs>=0.32.0",
     "httpx>=0.28.1",
     "mypy>=2.4.0",
+    "pillow>=12.3.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "reportlab>=5.0.1",
     "ruff>=0.16.10",
 ]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 asyncio_mode = "auto"
+
+# Parsing libraries that ship no type information: their imports are left untyped on purpose.
+[[tool.mypy.overrides]]
+module = ["pdfplumber.*", "pdfminer.*", "openpyxl.*", "pptx.*", "docx.*", "reportlab.*", "PIL.*"]
+ignore_missing_imports = true

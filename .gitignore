@@ -3,3 +3,5 @@
 __pycache__/
 *.pyc
 notes/api.py 
+# uploaded documents (content-addressed files live here)
+data/

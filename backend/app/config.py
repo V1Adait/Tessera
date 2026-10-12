@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     summarize_at: float = 0.7  # fraction of the input budget that triggers a summary
     recent_turns: int = 3  # turns kept word for word when a summary runs
     default_temperature: float | None = None
+    # --- document uploads and parsing ---
+    upload_dir: str = (
+        "data/uploads"  # content-addressed storage; file names come from hashes
+    )
+    max_upload_bytes: int = 50 * 1024 * 1024
+    max_pdf_pages: int = 1000
+    max_zip_entries: int = 5000  # Word, Excel and PowerPoint files are zip archives
+    max_zip_uncompressed_bytes: int = 300 * 1024 * 1024
+    max_zip_ratio: int = (
+        100  # a big entry may not be more than this many times its zipped size
+    )
+    parse_timeout_s: float = 600.0
+    max_concurrent_parses: int = 2
     database_url: str | None = (
         None  # e.g. postgresql://user:password@localhost:5432/tessera
     )
