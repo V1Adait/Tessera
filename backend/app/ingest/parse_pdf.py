@@ -34,7 +34,7 @@ from backend.app.ingest.tables import (
     looks_like_year,
     pad_rows,
 )
-from backend.app.ingest.text import join_lines
+from backend.app.ingest.text import join_lines, math_ratio, stray_glyphs
 
 logging.getLogger("pdfminer").setLevel(
     logging.ERROR
@@ -369,8 +369,23 @@ def _read_page(page: Any, number: int) -> _Page:
 
     tables = _detect_tables(page, number)
     table_boxes: list[BBox] = [t.bbox for t in tables if t.bbox]
-    figures = _detect_figures(page, number, table_boxes)
-    regions = table_boxes + [f.bbox for f in figures if f.bbox]
+    detected = _detect_figures(page, number, table_boxes)
+
+    # Fraction bars, sum signs and brackets are line art too, so a formula can look like a vector
+    # chart. A "chart" whose own text is mostly mathematical notation is kept as ONE flagged
+    # paragraph (so its pieces stay together) instead of being called a figure.
+    figures: list[_Element] = []
+    formulas: list[_Element] = []
+    for figure in detected:
+        assert figure.bbox is not None
+        if figure.subtype == "vector":
+            crop = page.crop(figure.bbox, strict=False)
+            figure.labels = [ln.text for ln in _read_lines(crop)]
+            if _is_formula_region(figure.labels):
+                formulas.append(_formula_element(figure, number))
+                continue
+        figures.append(figure)
+    regions = table_boxes + [f.bbox for f in [*figures, *formulas] if f.bbox]
 
     def keep(obj: dict[str, Any]) -> bool:
         return obj.get("object_type") != "char" or not any(
@@ -395,9 +410,6 @@ def _read_page(page: Any, number: int) -> _Page:
     # figures: read their real text (labels) and find their captions among the page's lines
     for figure in figures:
         assert figure.bbox is not None
-        if figure.subtype == "vector":
-            crop = page.crop(figure.bbox, strict=False)
-            figure.labels = [ln.text for ln in _read_lines(crop)]
         caption = _find_caption(result.lines, figure.bbox)
         if caption is not None:
             result.lines.remove(caption)
@@ -409,13 +421,36 @@ def _read_page(page: Any, number: int) -> _Page:
     ]
     if unlabelled_images:
         result.flags.append(f"images_not_read:{len(unlabelled_images)}")
-    result.others = [t for t in tables if t.rows] + [
-        f for f in figures if f.text or f.labels
-    ]
+    result.others = (
+        [t for t in tables if t.rows]
+        + [f for f in figures if f.text or f.labels]
+        + formulas
+    )
     if result.gutter is not None:
         for other in result.others:
             other.column = 0 if other.x0 < result.gutter else 1
     return result
+
+
+def _is_formula_region(labels: list[str]) -> bool:
+    """True if the text found inside a drawn region is mostly mathematical notation."""
+    joined = " ".join(labels)
+    return bool(joined) and (math_ratio(joined) >= 0.15 or stray_glyphs(joined) >= 2)
+
+
+def _formula_element(figure: _Element, number: int) -> _Element:
+    return _Element(
+        kind="paragraph",
+        page=number,
+        top=figure.top,
+        bottom=figure.bottom,
+        x0=figure.x0,
+        text=" ".join(figure.labels),
+        flags=["math_region"],
+        confidence=0.7,
+        page_height=figure.page_height,
+        bbox=figure.bbox,
+    )
 
 
 def _find_caption(lines: list[_Line], box: BBox) -> _Line | None:
@@ -486,16 +521,47 @@ def _body_size(pages: list[_Page]) -> float:
     return weight.most_common(1)[0][0] if weight else 0.0
 
 
-def _is_heading(line: _Line, body: float) -> bool:
+_SENTENCE_END = (".", "!", "?", ":", ";")
+_OPENERS = (
+    "\"'([{\u201c\u2018"  # characters that may open a heading before its first letter
+)
+
+
+def _is_heading(line: _Line, body: float, previous: _Line | None = None) -> bool:
+    """Is this line a heading? Big text is. A bold line at body size only is when it STANDS ALONE:
+    it starts with a capital (a bold phrase that wraps onto a new line mid-sentence starts
+    lower-case), and it does not continue an unfinished sentence on the line just above it.
+    Lines that are mostly maths are never headings."""
+    if math_ratio(line.text) >= 0.3:
+        return False
     words = len(line.text.split())
     if line.size >= body * 1.15 and len(line.text) <= 200:
         return True
-    return (
-        line.bold
-        and words <= 15
-        and len(line.text) <= 120
-        and not line.text.rstrip().endswith((".", ",", ";"))
-    )
+    if (
+        not line.bold
+        or words > 15
+        or len(line.text) > 120
+        or line.text.rstrip().endswith((".", ",", ";"))
+    ):
+        return False
+    first = line.text.lstrip(_OPENERS)[:1]
+    if not first or first.islower():
+        return (
+            False  # "riance unbiased estimator (MVUE)": the end of a wrapped sentence
+        )
+    if previous is not None and previous.column == line.column:
+        tight = (
+            0
+            <= line.top - previous.bottom
+            <= 0.6 * max(previous.bottom - previous.top, 1.0)
+        )
+        if (
+            tight
+            and not previous.bold
+            and not previous.text.rstrip().endswith(_SENTENCE_END)
+        ):
+            return False  # the line above is an unfinished sentence: this bold text continues it
+    return True
 
 
 def _paragraphs(page: _Page, body: float) -> list[_Element]:
@@ -525,12 +591,13 @@ def _paragraphs(page: _Page, body: float) -> list[_Element]:
         kind = "paragraph"
 
     ordered = sorted(page.lines, key=lambda ln: (ln.column, ln.top, ln.x0))
+    last: _Line | None = None  # the line just before this one in reading order
     for line in ordered:
         previous = current[-1] if current else None
         if previous is not None:
             gap = line.top - previous.bottom
             line_height = max(previous.bottom - previous.top, 1.0)
-            heading_line = _is_heading(line, body)
+            heading_line = _is_heading(line, body, last)
             if kind == "heading":
                 # a heading that wraps onto a second line stays one heading
                 new_block = not (
@@ -551,11 +618,12 @@ def _paragraphs(page: _Page, body: float) -> list[_Element]:
             if new_block:
                 flush()
         if not current:
-            if _is_heading(line, body):
+            if _is_heading(line, body, last):
                 kind = "heading"
             elif _BULLET.match(line.text):
                 kind = "list_item"
         current.append(line)
+        last = line
     flush()
     return elements
 
@@ -667,7 +735,12 @@ def parse_pdf(
         elif element.kind == "list_item":
             builder.list_item(element.text, page=element.page)
         elif element.kind == "paragraph":
-            builder.paragraph(element.text, page=element.page)
+            builder.paragraph(
+                element.text,
+                page=element.page,
+                confidence=element.confidence,
+                flags=element.flags,
+            )
         elif element.kind == "table":
             previous = builder.blocks[-1].text[:300] if builder.blocks else ""
             builder.table(

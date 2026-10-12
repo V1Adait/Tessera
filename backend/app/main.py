@@ -8,10 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router
+from backend.app.api_documents import router as documents_router
 from backend.app.api_workspaces import router as workspaces_router
 from backend.app.config import get_settings
+from backend.app.db import repository as repo
 from backend.app.db.migrate import pending_migrations
 from backend.app.db.pool import create_pool
+from backend.app.documents_service import DocumentService
 from backend.app.llm import get_default_llm
 
 logging.basicConfig(
@@ -29,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("started: provider=%s model=%s", settings.provider, settings.default_model)
 
     app.state.pool = None
+    app.state.documents = None
     if settings.database_url:
         pool = await create_pool(settings)
         pending = await pending_migrations(pool)
@@ -39,6 +43,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "Run: uv run python -m backend.app.db.migrate"
             )
         app.state.pool = pool
+        app.state.documents = DocumentService(pool, settings)
+        interrupted = await repo.recover_interrupted(pool)
+        if interrupted:
+            log.warning(
+                "%s document(s) were mid-parse at the last shutdown; marked failed, re-parse them",
+                interrupted,
+            )
         log.info("database pool ready")
     else:
         log.warning("DATABASE_URL is not set: running without persistence")
@@ -46,6 +57,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if app.state.documents is not None:
+            await app.state.documents.close()
         if app.state.pool is not None:
             await app.state.pool.close()
 
@@ -63,3 +76,4 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(workspaces_router)
+app.include_router(documents_router)

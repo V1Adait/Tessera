@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -11,6 +11,11 @@ MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["streaming", "complete", "stopped", "error"]
 TraceKind = Literal["chat", "summary"]
 TraceStatus = Literal["ok", "error", "rejected", "cancelled"]
+DocumentStatus = Literal[
+    "uploaded", "parsing", "parsed", "needs_review", "needs_ocr", "failed"
+]
+DocumentKind = Literal["pdf", "docx", "xlsx", "pptx", "html", "csv", "txt", "md"]
+BlockKind = Literal["heading", "paragraph", "list_item", "table", "figure"]
 
 
 class WorkspaceRecord(BaseModel):
@@ -98,3 +103,38 @@ class TraceRecord(BaseModel):
     first_token_ms: int | None = None
     error_code: str | None = None
     created_at: datetime | None = None  # filled in by the database
+
+
+class DocumentRecord(BaseModel):
+    id: UUID
+    workspace_id: UUID
+    entity_id: UUID | None
+    filename: str
+    kind: DocumentKind
+    sha256: str
+    size_bytes: int
+    status: DocumentStatus
+    status_detail: str | None
+    parser: str | None
+    page_count: int | None
+    char_count: int | None
+    report: dict[str, Any]
+    created_at: datetime
+    parsed_at: datetime | None
+
+
+class BlockRecord(BaseModel):
+    """One parsed block, as stored. Chunking reads these in `seq` order."""
+
+    id: UUID
+    document_id: UUID
+    seq: int
+    type: BlockKind
+    text: str
+    level: int | None
+    location: dict[str, Any]
+    data: dict[str, Any] | None
+    confidence: float
+    flags: list[str]
+    char_start: int
+    char_end: int

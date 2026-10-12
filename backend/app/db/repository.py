@@ -8,13 +8,17 @@ decides what runs in one transaction:
 Values always go through $1, $2 placeholders, never into the SQL text.
 """
 
+import json
+from typing import Any
 from uuid import UUID
 
 import asyncpg
 from asyncpg.pool import PoolConnectionProxy
 
 from backend.app.db.records import (
+    BlockRecord,
     ConversationRecord,
+    DocumentRecord,
     EntityRecord,
     MessageRole,
     MessageStatus,
@@ -24,6 +28,7 @@ from backend.app.db.records import (
     TrimEvent,
     WorkspaceRecord,
 )
+from backend.app.ingest.models import Block, assign_offsets
 
 Db = asyncpg.Connection | asyncpg.Pool | PoolConnectionProxy
 
@@ -373,3 +378,306 @@ async def list_traces(
         limit,
     )
     return [TraceRecord(**dict(r)) for r in rows]
+
+
+# --- documents and their parsed blocks --------------------------------------------------
+
+
+class EntityNotInWorkspaceError(LookupError):
+    """The entity does not exist, or belongs to a different workspace than the document."""
+
+
+class DuplicateDocumentError(Exception):
+    """This workspace already has a document with the same bytes. `existing` is that document."""
+
+    def __init__(self, existing: DocumentRecord) -> None:
+        super().__init__(f"duplicate of document {existing.id}")
+        self.existing = existing
+
+
+def _json(value: object) -> dict[str, Any] | None:
+    """asyncpg hands jsonb back as text unless a codec is set; accept both."""
+    if value is None:
+        return None
+    parsed: Any = json.loads(value) if isinstance(value, str) else value
+    return dict(parsed)
+
+
+def _document(row: asyncpg.Record) -> DocumentRecord:
+    data = dict(row)
+    data["report"] = _json(data["report"]) or {}
+    return DocumentRecord(**data)
+
+
+def _block(row: asyncpg.Record) -> BlockRecord:
+    data = dict(row)
+    data["location"] = _json(data["location"]) or {}
+    data["data"] = _json(data["data"])
+    return BlockRecord(**data)
+
+
+async def default_workspace_id(db: Db) -> UUID:
+    row = await db.fetchrow("SELECT id FROM workspaces ORDER BY created_at, id LIMIT 1")
+    if row is None:
+        raise WorkspaceNotFoundError("no workspace exists")
+    return row["id"]
+
+
+async def entity_in_workspace(db: Db, entity_id: UUID, workspace_id: UUID) -> bool:
+    row = await db.fetchrow(
+        "SELECT 1 FROM entities WHERE id = $1 AND workspace_id = $2",
+        entity_id,
+        workspace_id,
+    )
+    return row is not None
+
+
+async def create_document(
+    db: Db,
+    *,
+    workspace_id: UUID,
+    entity_id: UUID | None,
+    filename: str,
+    kind: str,
+    sha256: str,
+    size_bytes: int,
+) -> DocumentRecord:
+    """Record an uploaded file (status 'uploaded').
+
+    Raises WorkspaceNotFoundError, EntityNotInWorkspaceError, or DuplicateDocumentError (the
+    same bytes are already a document in this workspace; the error carries that document)."""
+    if await get_workspace(db, workspace_id) is None:
+        raise WorkspaceNotFoundError(str(workspace_id))
+    if entity_id is not None and not await entity_in_workspace(
+        db, entity_id, workspace_id
+    ):
+        raise EntityNotInWorkspaceError(str(entity_id))
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO documents (workspace_id, entity_id, filename, kind, sha256, size_bytes)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
+                      status_detail, parser, page_count, char_count, report, created_at, parsed_at
+            """,
+            workspace_id,
+            entity_id,
+            filename,
+            kind,
+            sha256,
+            size_bytes,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        existing = await db.fetchrow(
+            """
+            SELECT id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
+                   status_detail, parser, page_count, char_count, report, created_at, parsed_at
+            FROM documents WHERE workspace_id = $1 AND sha256 = $2
+            """,
+            workspace_id,
+            sha256,
+        )
+        if existing is None:  # deleted in the meantime: treat it as a lost race
+            raise
+        raise DuplicateDocumentError(_document(existing)) from exc
+    assert row is not None
+    return _document(row)
+
+
+async def get_document(db: Db, document_id: UUID) -> DocumentRecord | None:
+    row = await db.fetchrow(
+        """
+        SELECT id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
+               status_detail, parser, page_count, char_count, report, created_at, parsed_at
+        FROM documents WHERE id = $1
+        """,
+        document_id,
+    )
+    return _document(row) if row else None
+
+
+async def list_documents(
+    db: Db,
+    workspace_id: UUID,
+    *,
+    entity_id: UUID | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[DocumentRecord]:
+    rows = await db.fetch(
+        """
+        SELECT id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
+               status_detail, parser, page_count, char_count, report, created_at, parsed_at
+        FROM documents
+        WHERE workspace_id = $1 AND ($2::uuid IS NULL OR entity_id = $2)
+        ORDER BY created_at DESC, id
+        LIMIT $3 OFFSET $4
+        """,
+        workspace_id,
+        entity_id,
+        limit,
+        offset,
+    )
+    return [_document(r) for r in rows]
+
+
+async def assign_entity(db: Db, document_id: UUID, entity_id: UUID | None) -> None:
+    """Attach a document to an entity of the same workspace (None un-assigns it)."""
+    try:
+        result = await db.execute(
+            "UPDATE documents SET entity_id = $2 WHERE id = $1", document_id, entity_id
+        )
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise EntityNotInWorkspaceError(str(entity_id)) from exc
+    if result != "UPDATE 1":
+        raise LookupError(f"document {document_id} does not exist")
+
+
+async def claim_for_parsing(db: Db, document_id: UUID) -> DocumentRecord | None:
+    """Mark a document 'parsing' unless a worker already has it. Returns None if it is already
+    being parsed (or does not exist), so two workers can never parse the same document."""
+    row = await db.fetchrow(
+        """
+        UPDATE documents SET status = 'parsing', status_detail = NULL
+        WHERE id = $1 AND status <> 'parsing'
+        RETURNING id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
+                  status_detail, parser, page_count, char_count, report, created_at, parsed_at
+        """,
+        document_id,
+    )
+    return _document(row) if row else None
+
+
+async def set_document_status(
+    db: Db, document_id: UUID, status: str, detail: str | None = None
+) -> None:
+    await db.execute(
+        "UPDATE documents SET status = $2, status_detail = $3 WHERE id = $1",
+        document_id,
+        status,
+        detail,
+    )
+
+
+async def recover_interrupted(db: Db) -> int:
+    """After a restart, documents left 'uploaded' or 'parsing' will never finish by themselves.
+    Mark them failed (with a reason) so they show up and can be re-parsed."""
+    result = await db.execute(
+        """
+        UPDATE documents
+        SET status = 'failed', status_detail = 'interrupted by a restart: use re-parse'
+        WHERE status IN ('uploaded', 'parsing')
+        """
+    )
+    return int(result.split()[-1])
+
+
+def _block_rows(document_id: UUID, blocks: list[Block]) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = []
+    for seq, (block, (start, end)) in enumerate(
+        zip(blocks, assign_offsets(blocks), strict=True)
+    ):
+        if block.table is not None:
+            data: dict[str, Any] | None = block.table.model_dump()
+        elif block.labels:
+            data = {"labels": block.labels}
+        else:
+            data = None
+        rows.append(
+            (
+                document_id,
+                seq,
+                block.type,
+                block.text,
+                block.level,
+                json.dumps(block.location.model_dump(mode="json", exclude_none=True)),
+                json.dumps(data) if data is not None else None,
+                block.confidence,
+                block.flags,
+                start,
+                end,
+            )
+        )
+    return rows
+
+
+async def save_parse_result(
+    pool: asyncpg.Pool,
+    document_id: UUID,
+    *,
+    parser: str,
+    status: str,
+    detail: str | None,
+    page_count: int | None,
+    char_count: int,
+    report: dict[str, Any],
+    blocks: list[Block],
+) -> None:
+    """Replace a document's blocks and set its status, in ONE transaction: a document never has
+    half its blocks, and a re-parse swaps the old blocks for the new ones atomically."""
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "DELETE FROM document_blocks WHERE document_id = $1", document_id
+        )
+        await conn.executemany(
+            """
+            INSERT INTO document_blocks (document_id, seq, type, text, level, location, data,
+                                         confidence, flags, char_start, char_end)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11)
+            """,
+            _block_rows(document_id, blocks),
+        )
+        result = await conn.execute(
+            """
+            UPDATE documents
+            SET status = $2, status_detail = $3, parser = $4, page_count = $5,
+                char_count = $6, report = $7::jsonb, parsed_at = now()
+            WHERE id = $1
+            """,
+            document_id,
+            status,
+            detail,
+            parser,
+            page_count,
+            char_count,
+            json.dumps(report),
+        )
+        if result != "UPDATE 1":
+            raise LookupError(f"document {document_id} does not exist")
+
+
+async def list_blocks(
+    db: Db,
+    document_id: UUID,
+    *,
+    block_type: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[BlockRecord]:
+    rows = await db.fetch(
+        """
+        SELECT id, document_id, seq, type, text, level, location, data, confidence, flags,
+               char_start, char_end
+        FROM document_blocks
+        WHERE document_id = $1 AND ($2::text IS NULL OR type = $2)
+        ORDER BY seq
+        LIMIT $3 OFFSET $4
+        """,
+        document_id,
+        block_type,
+        limit,
+        offset,
+    )
+    return [_block(r) for r in rows]
+
+
+async def count_blocks(db: Db, document_id: UUID, block_type: str | None = None) -> int:
+    count = await db.fetchval(
+        """
+        SELECT count(*) FROM document_blocks
+        WHERE document_id = $1 AND ($2::text IS NULL OR type = $2)
+        """,
+        document_id,
+        block_type,
+    )
+    return int(count)

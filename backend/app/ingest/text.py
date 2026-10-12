@@ -91,3 +91,60 @@ def join_lines(lines: list[str]) -> str:
 def flag_for_removed(count: int) -> list[str]:
     """Flags to attach to a block when invisible characters were stripped from it."""
     return [f"invisible_characters_removed:{count}"] if count else []
+
+
+# --- text that came out of a PDF font mapping badly ------------------------------------------
+
+# Maths fonts in PDFs often store accents (hat, bar, tilde) under code points of unrelated alphabets,
+# so text extraction yields a stray Sinhala, Malayalam or Ethiopic character in the middle of a
+# formula. Real text in those languages is whole words; a FEW such characters inside ordinary text
+# is the tell-tale sign of a mapping accident.
+_JUNK_SCRIPTS = (
+    "SINHALA", "MALAYALAM", "ETHIOPIC", "TAMIL", "TELUGU", "KANNADA", "BENGALI",
+    "GURMUKHI", "GUJARATI", "ORIYA", "KHMER", "MYANMAR", "TIBETAN",
+)  # fmt: skip
+_FIRST_JUNK_CODE = 0x0900  # every junk script above starts after this code point
+
+
+def stray_glyphs(text: str) -> int:
+    """How many characters look like a font-mapping accident: private-use code points, or a few
+    characters of an unrelated alphabet inside otherwise ordinary text. Text that is mostly in one
+    of those scripts is real writing in that language and counts as 0."""
+    junk = 0
+    letters = 0
+    for ch in text:
+        category = unicodedata.category(ch)
+        if category == "Co" or ord(ch) >= _FIRST_JUNK_CODE and unicodedata.name(ch, "").startswith(
+            _JUNK_SCRIPTS
+        ):
+            junk += 1
+        if category.startswith("L"):
+            letters += 1
+    if letters >= 8 and junk / letters >= 0.25:
+        return 0  # a whole passage in that language
+    return junk
+
+
+def _is_mathy(ch: str) -> bool:
+    code = ord(ch)
+    if (
+        0x0370 <= code <= 0x03FF or 0x1D400 <= code <= 0x1D7FF
+    ):  # Greek, mathematical italic/bold
+        return True
+    if (
+        unicodedata.category(ch) == "Sm" and code > 127
+    ):  # operators: sum, integral, <=, ...
+        return True
+    return unicodedata.category(ch) == "Co" or (
+        code >= _FIRST_JUNK_CODE and unicodedata.name(ch, "").startswith(_JUNK_SCRIPTS)
+    )
+
+
+def math_ratio(text: str) -> float:
+    """The share of non-space characters that are mathematical notation: Greek letters,
+    mathematical italic letters, operators, and accent glyphs stored under odd code points. Prose
+    with the occasional mu or sigma stays near 0; an extracted formula is high."""
+    chars = [c for c in text if not c.isspace()]
+    if not chars:
+        return 0.0
+    return sum(_is_mathy(c) for c in chars) / len(chars)
