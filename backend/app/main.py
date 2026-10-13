@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router
 from backend.app.api_documents import router as documents_router
+from backend.app.api_query import router as query_router
 from backend.app.api_workspaces import router as workspaces_router
 from backend.app.config import get_settings
 from backend.app.db import repository as repo
@@ -16,6 +17,7 @@ from backend.app.db.migrate import pending_migrations
 from backend.app.db.pool import create_pool
 from backend.app.documents_service import DocumentService
 from backend.app.llm import get_default_llm
+from backend.app.query.service import build_query_service
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -33,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.pool = None
     app.state.documents = None
+    app.state.query = None
     if settings.database_url:
         pool = await create_pool(settings)
         pending = await pending_migrations(pool)
@@ -44,6 +47,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
         app.state.pool = pool
         app.state.documents = DocumentService(pool, settings)
+        app.state.query = build_query_service(pool, settings)
         interrupted = await repo.recover_interrupted(pool)
         if interrupted:
             log.warning(
@@ -59,6 +63,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if app.state.documents is not None:
             await app.state.documents.close()
+        if app.state.query is not None:
+            await app.state.query.close()
         if app.state.pool is not None:
             await app.state.pool.close()
 
@@ -77,3 +83,4 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(workspaces_router)
 app.include_router(documents_router)
+app.include_router(query_router)

@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     summary_max_tokens: int = 600  # hard cap on the summary the model may write
     summary_input_max_tokens: int = 60_000  # most history folded in by one summary call
 
+    # Query handling: classify the question, then plan it. See backend/app/query/.
+    router_jev_model: str = "typesafe/jev-1.13"  # pinned: an alias would move under us
+    router_provider: Provider = (
+        "openrouter"  # for the LLM classifier, metrics and planner
+    )
+    router_llm_model: str = "anthropic/claude-haiku-5.5"
+    router_confidence_threshold: float = 0.8  # below this, ask for a second opinion
+    router_timeout_s: float = 10.0
+    router_max_tokens: int = 300
+    planner_max_tokens: int = 800
+    planner_max_dimensions: int = 6  # rubric dimensions the planner may pick per entity
+    plan_soft_cap: int = 8  # more tasks than this need the user's confirmation
+    plan_hard_cap: int = 50  # more than this is refused
+
     def key_for(self, provider: Provider) -> str | None:
         return getattr(self, f"{provider}_api_key")
 

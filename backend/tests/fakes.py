@@ -148,3 +148,30 @@ class BigPromptFake(BaseChatModel):
         yield ChatGenerationChunk(
             message=AIMessageChunk(content="", usage_metadata=usage)
         )
+
+
+class QueueFake(BaseChatModel):
+    """Answers with the next item of `replies` (a str, or an Exception to raise), repeating the
+    last one when the list runs out. Records every prompt, so tests can check what was sent."""
+
+    replies: list[Any] = Field(default_factory=list)
+    seen: list[Any] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "queue-fake"
+
+    def _generate(
+        self, messages: list[BaseMessage], *args: Any, **kwargs: Any
+    ) -> ChatResult:
+        self.seen.append(messages)
+        item = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        if isinstance(item, Exception):
+            raise item
+        message = AIMessage(
+            content=item,
+            usage_metadata=UsageMetadata(
+                input_tokens=50, output_tokens=10, total_tokens=60
+            ),
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])

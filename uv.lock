@@ -1664,6 +1664,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "beautifulsoup4" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-openai" },
@@ -1682,7 +1683,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "asyncpg-stubs" },
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pillow" },
     { name = "pytest" },
@@ -1697,6 +1697,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.32.0" },
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "fastapi", specifier = ">=0.142.2" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", specifier = ">=1.4.3" },
     { name = "langchain-anthropic", specifier = ">=1.7.5" },
     { name = "langchain-openai", specifier = ">=1.6.7" },
@@ -1715,7 +1716,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "asyncpg-stubs", specifier = ">=0.32.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", specifier = ">=2.4.0" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "pytest", specifier = ">=9.1.1" },
