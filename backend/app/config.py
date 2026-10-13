@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     summary_max_tokens: int = 600  # hard cap on the summary the model may write
     summary_input_max_tokens: int = 60_000  # most history folded in by one summary call
 
+    # Chunking: sizes in estimated tokens (3 characters each). See backend/app/chunking/.
+    chunk_target_tokens: int = 512  # merging small blocks stops here
+    chunk_max_tokens: int = 800  # hard ceiling for one chunk
+    chunk_parent_max_tokens: int = (
+        3000  # a section bigger than this is cut into windows
+    )
+
     # Query handling: classify the question, then plan it. See backend/app/query/.
     router_jev_model: str = "typesafe/jev-1.13"  # pinned: an alias would move under us
     router_provider: Provider = (

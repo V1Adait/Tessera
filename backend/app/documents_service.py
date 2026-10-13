@@ -20,6 +20,7 @@ from uuid import UUID
 
 import asyncpg
 
+from backend.app.chunking.service import document_context, make_chunks, rechunk
 from backend.app.config import Settings
 from backend.app.db import repository as repo
 from backend.app.db.records import DocumentRecord
@@ -135,6 +136,14 @@ class DocumentService:
         self._spawn(self._parse_claimed(document))
         return document
 
+    async def assign_entity(self, document_id: UUID, entity_id: UUID | None) -> None:
+        """Attach a document to an entity (or detach it). The chunks' search text names the
+        entity, so they are rebuilt from the stored blocks. Raises what repo.assign_entity does."""
+        await repo.assign_entity(self.pool, document_id, entity_id)
+        document = await repo.get_document(self.pool, document_id)
+        if document is not None and document.status in ("parsed", "needs_review"):
+            await rechunk(self.pool, self.settings, document_id)
+
     async def _fail(self, document: DocumentRecord, reason: str) -> None:
         try:
             await repo.set_document_status(self.pool, document.id, "failed", reason)
@@ -154,6 +163,11 @@ class DocumentService:
                     timeout,
                 )
             status, detail = decide_status(parsed)
+            chunks = await make_chunks(
+                parsed.blocks,
+                await document_context(self.pool, document),
+                self.settings,
+            )
             await repo.save_parse_result(
                 self.pool,
                 document.id,
@@ -164,6 +178,7 @@ class DocumentService:
                 char_count=sum(len(b.text) for b in parsed.blocks),
                 report=build_report(parsed),
                 blocks=parsed.blocks,
+                chunks=chunks,
             )
         except TimeoutError:
             # the worker thread cannot be killed; it finishes in the background and is ignored

@@ -138,3 +138,55 @@ class BlockRecord(BaseModel):
     flags: list[str]
     char_start: int
     char_end: int
+
+
+ChunkKindName = Literal["prose", "table", "figure"]
+
+
+class SectionRecord(BaseModel):
+    """A parent: a heading and what is under it."""
+
+    id: UUID
+    document_id: UUID
+    ordinal: int
+    path: list[str]
+    char_start: int
+    char_end: int
+    page_start: int | None
+    page_end: int | None
+    token_count: int
+
+
+class ChunkRecord(BaseModel):
+    """A child chunk, as stored. `text` is what quotes are checked against; `search_text` is
+    only for finding it."""
+
+    id: UUID
+    document_id: UUID
+    section_id: UUID
+    ordinal: int
+    kind: ChunkKindName
+    text: str
+    search_text: str
+    section_path: list[str]
+    block_seqs: list[int]
+    char_start: int
+    char_end: int
+    token_count: int
+    page_start: int | None
+    page_end: int | None
+    sheet: str | None
+    slide: int | None
+    cell_range: str | None
+    units: str | None
+    confidence: float
+    flags: list[str]
+    content_hash: str
+
+
+class ChunkHit(BaseModel):
+    """A full-text search result: the chunk, its document, and the score."""
+
+    chunk: ChunkRecord
+    filename: str
+    score: float

@@ -41,7 +41,7 @@ class Doc:
         return self
 
     def p(self, text: str, **where: object) -> Doc:
-        self._b.paragraph(text, **where)
+        self._b.paragraph(text, **where)  # type: ignore[arg-type]
         return self
 
     def li(self, text: str) -> Doc:

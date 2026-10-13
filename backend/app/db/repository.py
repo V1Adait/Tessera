@@ -15,13 +15,17 @@ from uuid import UUID
 import asyncpg
 from asyncpg.pool import PoolConnectionProxy
 
+from backend.app.chunking.models import ChunkSet
 from backend.app.db.records import (
     BlockRecord,
+    ChunkHit,
+    ChunkRecord,
     ConversationRecord,
     DocumentRecord,
     EntityRecord,
     MessageRole,
     MessageStatus,
+    SectionRecord,
     StoredMessage,
     StoredSummary,
     TraceRecord,
@@ -612,9 +616,11 @@ async def save_parse_result(
     char_count: int,
     report: dict[str, Any],
     blocks: list[Block],
+    chunks: ChunkSet | None = None,
 ) -> None:
-    """Replace a document's blocks and set its status, in ONE transaction: a document never has
-    half its blocks, and a re-parse swaps the old blocks for the new ones atomically."""
+    """Replace a document's blocks (and its chunks) and set its status, in ONE transaction: a
+    document never has half its blocks, or chunks that belong to older blocks, and a re-parse
+    swaps the old ones for the new ones atomically."""
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "DELETE FROM document_blocks WHERE document_id = $1", document_id
@@ -627,6 +633,7 @@ async def save_parse_result(
             """,
             _block_rows(document_id, blocks),
         )
+        await replace_chunks(conn, document_id, chunks or ChunkSet())
         result = await conn.execute(
             """
             UPDATE documents
@@ -681,3 +688,189 @@ async def count_blocks(db: Db, document_id: UUID, block_type: str | None = None)
         block_type,
     )
     return int(count)
+
+
+# --- chunks -----------------------------------------------------------------------------
+
+
+def _chunk(row: asyncpg.Record) -> ChunkRecord:
+    data = {k: v for k, v in dict(row).items() if k in ChunkRecord.model_fields}
+    return ChunkRecord(**data)
+
+
+_CHUNK_COLUMNS = """
+    c.id, c.document_id, c.section_id, c.ordinal, c.kind, c.text, c.search_text,
+    c.section_path, c.block_seqs, c.char_start, c.char_end, c.token_count, c.page_start,
+    c.page_end, c.sheet, c.slide, c.cell_range, c.units, c.confidence, c.flags, c.content_hash
+"""
+
+
+async def replace_chunks(
+    db: asyncpg.Connection | PoolConnectionProxy, document_id: UUID, chunk_set: ChunkSet
+) -> None:
+    """Swap a document's sections and chunks for a new set. Call it inside a transaction (it
+    takes a connection, not a pool): the old chunks are gone only if the new ones are in."""
+    await db.execute(
+        "DELETE FROM document_sections WHERE document_id = $1", document_id
+    )
+    section_ids: dict[int, UUID] = {}
+    for parent in chunk_set.parents:
+        section_ids[parent.ordinal] = await db.fetchval(
+            """
+            INSERT INTO document_sections (document_id, ordinal, path, char_start, char_end,
+                                           page_start, page_end, token_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id
+            """,
+            document_id,
+            parent.ordinal,
+            parent.path,
+            parent.char_start,
+            parent.char_end,
+            parent.page_start,
+            parent.page_end,
+            parent.token_count,
+        )
+    await db.executemany(
+        """
+        INSERT INTO document_chunks (document_id, section_id, ordinal, kind, text, search_text,
+                                     section_path, block_seqs, char_start, char_end, token_count,
+                                     page_start, page_end, sheet, slide, cell_range, units,
+                                     confidence, flags, content_hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20)
+        """,
+        [
+            (
+                document_id,
+                section_ids[c.parent_ordinal],
+                c.ordinal,
+                c.kind,
+                c.text,
+                c.search_text,
+                c.section_path,
+                c.block_seqs,
+                c.char_start,
+                c.char_end,
+                c.token_count,
+                c.page_start,
+                c.page_end,
+                c.sheet,
+                c.slide,
+                c.cell_range,
+                c.units,
+                c.confidence,
+                c.flags,
+                c.content_hash,
+            )
+            for c in chunk_set.chunks
+        ],
+    )
+
+
+async def save_chunks(
+    pool: asyncpg.Pool, document_id: UUID, chunk_set: ChunkSet
+) -> None:
+    """Rebuild a document's chunks without touching its blocks (for example after it was
+    assigned to an entity, which changes the search text). One transaction."""
+    async with pool.acquire() as conn, conn.transaction():
+        await replace_chunks(conn, document_id, chunk_set)
+
+
+async def list_chunks(
+    db: Db, document_id: UUID, *, limit: int = 100, offset: int = 0
+) -> list[ChunkRecord]:
+    rows = await db.fetch(
+        f"""
+        SELECT {_CHUNK_COLUMNS} FROM document_chunks c
+        WHERE c.document_id = $1
+        ORDER BY c.ordinal LIMIT $2 OFFSET $3
+        """,
+        document_id,
+        limit,
+        offset,
+    )
+    return [_chunk(r) for r in rows]
+
+
+async def count_chunks(db: Db, document_id: UUID) -> int:
+    count = await db.fetchval(
+        "SELECT count(*) FROM document_chunks WHERE document_id = $1", document_id
+    )
+    return int(count)
+
+
+async def get_chunk(db: Db, chunk_id: UUID) -> ChunkRecord | None:
+    row = await db.fetchrow(
+        f"SELECT {_CHUNK_COLUMNS} FROM document_chunks c WHERE c.id = $1", chunk_id
+    )
+    return _chunk(row) if row else None
+
+
+async def list_sections(db: Db, document_id: UUID) -> list[SectionRecord]:
+    rows = await db.fetch(
+        """
+        SELECT id, document_id, ordinal, path, char_start, char_end, page_start, page_end,
+               token_count
+        FROM document_sections WHERE document_id = $1 ORDER BY ordinal
+        """,
+        document_id,
+    )
+    return [SectionRecord(**dict(r)) for r in rows]
+
+
+async def get_section_chunks(db: Db, section_id: UUID) -> list[ChunkRecord]:
+    """Every chunk of one parent, in reading order: what the model reads for a found chunk."""
+    rows = await db.fetch(
+        f"""
+        SELECT {_CHUNK_COLUMNS} FROM document_chunks c
+        WHERE c.section_id = $1 ORDER BY c.ordinal
+        """,
+        section_id,
+    )
+    return [_chunk(r) for r in rows]
+
+
+async def entity_name(db: Db, entity_id: UUID | None) -> str | None:
+    if entity_id is None:
+        return None
+    name: str | None = await db.fetchval(
+        "SELECT name FROM entities WHERE id = $1", entity_id
+    )
+    return name
+
+
+async def search_chunks_text(
+    db: Db,
+    workspace_id: UUID,
+    query: str,
+    *,
+    entity_ids: list[UUID] | None = None,
+    limit: int = 10,
+) -> list[ChunkHit]:
+    """Full-text search over search_text, inside one workspace (and optionally some entities).
+
+    The scope filter runs in SQL BEFORE ranking, so another workspace's text can never appear.
+    `websearch_to_tsquery` reads plain words safely (quotes, OR, -word) and never raises on odd
+    input. Ranking is ts_rank_cd: a first baseline to be measured, not a final choice."""
+    rows = await db.fetch(
+        f"""
+        SELECT {_CHUNK_COLUMNS}, d.filename,
+               ts_rank_cd(c.search_tsv, websearch_to_tsquery('english', $2)) AS score
+        FROM document_chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE d.workspace_id = $1
+          AND ($3::uuid[] IS NULL OR d.entity_id = ANY($3))
+          AND c.search_tsv @@ websearch_to_tsquery('english', $2)
+        ORDER BY score DESC, c.document_id, c.ordinal
+        LIMIT $4
+        """,
+        workspace_id,
+        query,
+        entity_ids,
+        limit,
+    )
+    return [
+        ChunkHit(chunk=_chunk(r), filename=r["filename"], score=float(r["score"]))
+        for r in rows
+    ]

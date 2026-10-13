@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from backend.app.config import Settings, get_settings
 from backend.app.db import repository as repo
 from backend.app.db.pool import get_pool
-from backend.app.db.records import BlockKind, BlockRecord, DocumentRecord
+from backend.app.db.records import BlockKind, BlockRecord, ChunkRecord, DocumentRecord
 from backend.app.documents_service import DocumentService, ParseBusyError
 from backend.app.ingest.intake import IntakeError
 
@@ -52,6 +52,7 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 class DocumentView(DocumentRecord):
     block_count: int | None = None  # how many blocks the parser produced
+    chunk_count: int | None = None  # how many chunks were built from them
     duplicate: bool = (
         False  # on upload: these bytes were already a document in the workspace
     )
@@ -136,7 +137,11 @@ async def _require(pool: asyncpg.Pool, document_id: UUID) -> DocumentRecord:
 @router.get("/documents/{document_id}", response_model=DocumentView)
 async def get_document(document_id: UUID, pool: PoolDep) -> DocumentView:
     document = await _require(pool, document_id)
-    return _view(document, block_count=await repo.count_blocks(pool, document_id))
+    return _view(
+        document,
+        block_count=await repo.count_blocks(pool, document_id),
+        chunk_count=await repo.count_chunks(pool, document_id),
+    )
 
 
 @router.get("/documents/{document_id}/blocks", response_model=list[BlockRecord])
@@ -152,6 +157,18 @@ async def get_blocks(
     return await repo.list_blocks(
         pool, document_id, block_type=type, limit=limit, offset=offset
     )
+
+
+@router.get("/documents/{document_id}/chunks", response_model=list[ChunkRecord])
+async def get_chunks(
+    document_id: UUID,
+    pool: PoolDep,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ChunkRecord]:
+    """The chunks built from the parsed blocks, in reading order (read-only, for inspection)."""
+    await _require(pool, document_id)
+    return await repo.list_chunks(pool, document_id, limit=limit, offset=offset)
 
 
 @router.post(
@@ -174,11 +191,11 @@ async def reparse_document(document_id: UUID, service: ServiceDep) -> DocumentVi
 
 @router.patch("/documents/{document_id}", response_model=DocumentView)
 async def assign_document(
-    document_id: UUID, body: AssignEntity, pool: PoolDep
+    document_id: UUID, body: AssignEntity, pool: PoolDep, service: ServiceDep
 ) -> DocumentView:
     """Attach a document to an entity (a row of the matrix) of the same workspace."""
     try:
-        await repo.assign_entity(pool, document_id, body.entity_id)
+        await service.assign_entity(document_id, body.entity_id)
     except repo.EntityNotInWorkspaceError:
         raise HTTPException(
             status_code=404, detail="entity not found in this workspace"
@@ -186,4 +203,8 @@ async def assign_document(
     except LookupError:
         raise HTTPException(status_code=404, detail="document not found") from None
     document = await _require(pool, document_id)
-    return _view(document, block_count=await repo.count_blocks(pool, document_id))
+    return _view(
+        document,
+        block_count=await repo.count_blocks(pool, document_id),
+        chunk_count=await repo.count_chunks(pool, document_id),
+    )
