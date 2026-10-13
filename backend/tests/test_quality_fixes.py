@@ -23,7 +23,7 @@ from backend.app.ingest.parse_pdf import (
 from backend.app.ingest.text import math_ratio, stray_glyphs
 from backend.tests.fakes import make_settings
 
-SINHALA_HAT = chr(0x0DE1)  # how one maths font stores the "hat" accent
+SINHALA_HAT = chr(0x0DD8)  # how one maths font stores the "hat" accent
 MALAYALAM_BAR = chr(0x0D25)  # ... and the "bar" accent
 ETHIOPIC = chr(0x1218)
 PRIVATE_USE = chr(0xE000)
@@ -390,9 +390,9 @@ def test_a_real_bold_heading_is_still_a_heading_and_the_text_below_it_a_paragrap
     doc = parse(tmp_path, two_pdf_lines(draw))
 
     assert [(b.type, b.text[:11]) for b in doc.blocks] == [
-        ("paragraph", "This paragra"),
+        ("paragraph", "This paragr"),
         ("heading", "Key Results"),
-        ("paragraph", "Revenue gro"),
+        ("paragraph", "Revenue gre"),
     ]
 
 
