@@ -114,8 +114,10 @@ def stray_glyphs(text: str) -> int:
     letters = 0
     for ch in text:
         category = unicodedata.category(ch)
-        if category == "Co" or ord(ch) >= _FIRST_JUNK_CODE and unicodedata.name(ch, "").startswith(
-            _JUNK_SCRIPTS
+        if (
+            category == "Co"
+            or ord(ch) >= _FIRST_JUNK_CODE
+            and unicodedata.name(ch, "").startswith(_JUNK_SCRIPTS)
         ):
             junk += 1
         if category.startswith("L"):
