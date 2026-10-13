@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["streaming", "complete", "stopped", "error"]
-TraceKind = Literal["chat", "summary"]
+TraceKind = Literal["chat", "summary", "classify", "extract", "plan"]
 TraceStatus = Literal["ok", "error", "rejected", "cancelled"]
 DocumentStatus = Literal[
     "uploaded", "parsing", "parsed", "needs_review", "needs_ocr", "failed"
