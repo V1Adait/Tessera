@@ -24,6 +24,7 @@ from backend.app.chunking.service import document_context, make_chunks, rechunk
 from backend.app.config import Settings
 from backend.app.db import repository as repo
 from backend.app.db.records import DocumentRecord
+from backend.app.embeddings.indexer import Indexer
 from backend.app.ingest.intake import IntakeLimits
 from backend.app.ingest.models import ParseError
 from backend.app.ingest.parse import build_report, decide_status, page_count, parse_file
@@ -49,10 +50,14 @@ class DocumentService:
         pool: asyncpg.Pool,
         settings: Settings,
         scan_parser: ScanParser | None = None,
+        indexer: Indexer | None = None,
     ) -> None:
         self.pool = pool
         self.settings = settings
         self.scan_parser = scan_parser
+        self.indexer = (
+            indexer  # when set, parsed documents are embedded in the background
+        )
         self._slots = asyncio.Semaphore(max(1, settings.max_concurrent_parses))
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -143,6 +148,8 @@ class DocumentService:
         document = await repo.get_document(self.pool, document_id)
         if document is not None and document.status in ("parsed", "needs_review"):
             await rechunk(self.pool, self.settings, document_id)
+            if self.indexer is not None:
+                self.indexer.schedule(document_id)
 
     async def _fail(self, document: DocumentRecord, reason: str) -> None:
         try:
@@ -180,6 +187,8 @@ class DocumentService:
                 blocks=parsed.blocks,
                 chunks=chunks,
             )
+            if self.indexer is not None:
+                self.indexer.schedule(document.id)
         except TimeoutError:
             # the worker thread cannot be killed; it finishes in the background and is ignored
             await self._fail(document, f"parsing took longer than {timeout:g} seconds")

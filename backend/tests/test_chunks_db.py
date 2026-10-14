@@ -316,6 +316,41 @@ async def test_search_finds_a_chunk_by_its_words_and_by_its_section_heading(
     assert by_heading  # the heading is in search_text, not in the chunk's own text
 
 
+async def test_expanding_hits_reads_each_parent_once_with_all_its_chunks(pool, service):
+    from backend.app.chunking.expand import expand_to_parents
+
+    document = await upload_and_parse(
+        service,
+        pool,
+        a_docx("Revolver matures in March 2027.", "Revolver margin is 2 percent."),
+    )
+    hits = await repo.search_chunks_text(pool, document.workspace_id, "revolver")
+
+    views = await expand_to_parents(pool, hits, max_parents=5)
+
+    assert len(views) == 1  # one section, however many chunks matched
+    view = views[0]
+    stored = await repo.list_chunks(pool, document.id)
+    assert [c.id for c in view.chunks] == [c.id for c in stored]
+    assert set(view.hit_chunk_ids) <= {c.id for c in stored}
+    assert "Revolver matures" in view.text and "Revolver margin" in view.text
+
+
+async def test_expanding_respects_the_parent_cap(pool, service):
+    from backend.app.chunking.expand import expand_to_parents
+
+    def build(d):
+        for i in range(4):
+            d.add_heading(f"Facility {i}", 1)
+            d.add_paragraph("The revolver is described here in some detail. " * 8)
+
+    document = await upload_and_parse(service, pool, mf.docx_bytes(build))
+    hits = await repo.search_chunks_text(pool, document.workspace_id, "revolver")
+
+    assert len(await expand_to_parents(pool, hits, max_parents=2)) <= 2
+    assert await expand_to_parents(pool, [], max_parents=5) == []
+
+
 async def test_search_only_returns_chunks_from_the_asked_workspace(pool, service):
     document = await upload_and_parse(
         service, pool, a_docx("The revolver matures soon.")

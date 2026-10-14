@@ -601,3 +601,153 @@ def test_a_parent_page_range_covers_its_chunks():
     result = run(doc)
 
     assert (result.parents[0].page_start, result.parents[0].page_end) == (2, 3)
+
+
+# --- minimum sizes ------------------------------------------------------------------------
+# min child 6 tokens = 18 characters; parent min 20 tokens = 60 characters.
+
+MIN = ChunkLimits(
+    min_tokens=6,
+    target_tokens=10,
+    max_tokens=20,
+    parent_min_tokens=20,
+    parent_max_tokens=60,
+)
+OFF = ChunkLimits(target_tokens=10, max_tokens=20, parent_max_tokens=60)
+
+
+def runm(doc: Doc, limits: ChunkLimits) -> ChunkSet:
+    result = build_chunks(doc.blocks, CTX, limits)
+    check_invariants(doc.blocks, result, limits)
+    return result
+
+
+def test_the_minimums_are_off_by_default():
+    assert ChunkLimits().min_tokens == 0 and ChunkLimits().parent_min_tokens == 0
+
+
+def test_limits_must_be_ordered():
+    import pytest
+
+    with pytest.raises(ValueError):
+        ChunkLimits(min_tokens=600, target_tokens=512)
+    with pytest.raises(ValueError):
+        ChunkLimits(parent_min_tokens=4000, parent_max_tokens=3000)
+    with pytest.raises(ValueError):
+        ChunkLimits(max_tokens=4000, parent_max_tokens=3000)
+
+
+def test_a_tiny_chunk_joins_the_next_block_even_past_the_target():
+    doc = (
+        Doc().p("Tiny.").p(fixed("b", 30))
+    )  # 5 chars (2 tokens), then 30: joined 37 > target 30
+
+    off = runm(doc, OFF)
+    on = runm(doc, MIN)
+
+    assert len(off.chunks) == 2
+    assert len(on.chunks) == 1 and on.chunks[0].block_seqs == [0, 1]
+
+
+def test_a_tiny_last_chunk_folds_into_the_one_before_it():
+    doc = (
+        Doc().p(fixed("a", 40)).p("Tail.")
+    )  # 40 chars is over the target, so "Tail." stands alone
+
+    off = runm(doc, OFF)
+    on = runm(doc, MIN)
+
+    assert [len(c.text) for c in off.chunks] == [40, 5]
+    assert len(on.chunks) == 1
+    assert on.chunks[0].block_seqs == [0, 1] and on.chunks[0].text.endswith("Tail.")
+
+
+def test_a_tiny_chunk_stays_alone_if_folding_would_break_the_max():
+    doc = (
+        Doc().p(fixed("a", 58)).p("Tail.")
+    )  # 58 + 2 + 5 = 65 chars = 22 tokens > max 20
+
+    on = runm(doc, MIN)
+
+    assert [len(c.text) for c in on.chunks] == [58, 5]
+
+
+def test_a_tiny_chunk_is_not_merged_across_a_table_or_into_one():
+    doc = Doc().p("Tiny one.").table(ROWS).p("Tiny two.")
+
+    on = runm(doc, MIN)
+
+    assert [c.kind for c in on.chunks] == ["prose", "table", "prose"]
+
+
+def test_a_small_table_is_exempt_from_the_minimum():
+    on = runm(Doc().table([["a", "b"], ["1", "2"]]), MIN)
+
+    assert [c.kind for c in on.chunks] == ["table"]
+
+
+def test_the_tail_piece_of_a_split_block_does_not_merge_with_its_neighbour():
+    doc = Doc().p(f"{A} {B} {C}").p("Next.")  # the first block is split in two pieces
+
+    on = runm(doc, MIN)
+
+    assert [c.block_seqs for c in on.chunks] == [[0], [0], [1]]
+
+
+def test_a_tiny_section_is_merged_with_the_next_into_one_parent():
+    doc = Doc().h("A").p("Tiny.").h("B").p(fixed("b", 40))
+
+    off = runm(doc, OFF)
+    on = runm(doc, MIN)
+
+    assert len(off.parents) == 2
+    assert len(on.parents) == 1
+    assert on.parents[0].path == ["A"]  # the path of the first section
+    assert [c.section_path for c in on.chunks] == [
+        ["A"],
+        ["B"],
+    ]  # chunks keep their own
+
+
+def test_an_empty_section_is_absorbed_instead_of_left_as_a_parent_without_chunks():
+    doc = Doc().h("Item 7", 1).h("Liquidity", 2).p(fixed("p", 40))
+
+    off = runm(doc, OFF)
+    on = runm(doc, MIN)
+
+    assert [p.token_count for p in off.parents] == [0, 14]
+    assert len(on.parents) == 1 and on.parents[0].token_count == 14
+
+
+def test_a_tiny_last_section_folds_into_the_previous_parent():
+    doc = Doc().h("A").p(fixed("a", 40)).h("B").p("Tiny.")
+
+    on = runm(doc, MIN)
+
+    assert len(on.parents) == 1
+
+
+def test_parents_never_merge_past_the_parent_max():
+    # section A is three 20-token chunks = exactly the 60-token cap, so tiny B cannot join it
+    doc = (
+        Doc()
+        .h("A")
+        .p(fixed("a", 58))
+        .p(fixed("b", 58))
+        .p(fixed("c", 58))
+        .h("B")
+        .p("Tiny.")
+    )
+
+    on = runm(doc, MIN)
+
+    assert len(on.parents) == 2
+    assert all(p.token_count <= MIN.parent_max_tokens for p in on.parents)
+
+
+def test_big_enough_sections_are_not_merged():
+    doc = Doc().h("A").p(fixed("a", 70)).h("B").p(fixed("b", 70))
+
+    on = runm(doc, MIN)
+
+    assert len(on.parents) == 2

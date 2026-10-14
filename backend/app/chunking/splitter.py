@@ -23,6 +23,10 @@ The rules, which backend/tests/test_chunking.py checks one by one:
     header); a repeated header is not part of the span.
  8. A section over `parent_max_tokens` becomes several Sections with the same path. The first
     starts at the heading, a later one at its first chunk.
+ 8b. Minimums (off when 0). A prose chunk under `min_tokens` joins the next block even past the
+    target (up to the max), or folds into the chunk before it when they are neighbours. A parent
+    under `parent_min_tokens` merges with the next parent (the last one with the previous), up to
+    `parent_max_tokens`; it keeps the path of its first section. Tables and figures are exempt.
  9. `search_text` = one context line (document, section path, table units), a newline, `text`.
 10. A chunk's confidence is the lowest of its blocks, its flags are theirs combined and sorted.
     A block with no text is skipped AND ends the current chunk, so a chunk's text always stays
@@ -108,6 +112,28 @@ class _Section:
     items: list[int] = field(default_factory=list)
 
 
+@dataclass
+class _Window:
+    """One future parent: a run of chunks plus the span of text it covers."""
+
+    path: list[str]
+    start: int
+    end: int
+    chunks: list[Chunk]
+    pages: list[int]
+    page_ends: list[int]
+
+    @property
+    def tokens(self) -> int:
+        return sum(c.token_count for c in self.chunks)
+
+    def absorb(self, later: _Window) -> None:
+        self.end = later.end
+        self.chunks += later.chunks
+        self.pages += later.pages
+        self.page_ends += later.page_ends
+
+
 class _Builder:
     def __init__(
         self, blocks: list[Block], context: DocContext, limits: ChunkLimits
@@ -174,21 +200,26 @@ class _Builder:
     def chunks_for(self, section: _Section) -> list[Chunk]:
         chunks: list[Chunk] = []
         pending: list[int] = []  # prose blocks waiting to be merged into one chunk
+        last_whole: list[
+            int
+        ] = []  # blocks of the last chunk, if it was made of whole blocks
 
         def flush() -> None:
-            if pending:
-                start, end = self.spans[pending[0]][0], self.spans[pending[-1]][1]
-                chunks.append(
-                    self.make(
-                        "prose",
-                        self.canon[start:end],
-                        start,
-                        end,
-                        list(pending),
-                        section.path,
-                    )
+            nonlocal last_whole
+            if not pending:
+                return
+            blocks = list(pending)
+            if self.joins_backwards(last_whole, pending):
+                chunks.pop()  # too small to stand alone: fold it into the chunk before it
+                blocks = [*last_whole, *pending]
+            start, end = self.spans[blocks[0]][0], self.spans[blocks[-1]][1]
+            chunks.append(
+                self.make(
+                    "prose", self.canon[start:end], start, end, blocks, section.path
                 )
-                pending.clear()
+            )
+            last_whole = blocks
+            pending.clear()
 
         for i in section.items:
             block = self.blocks[i]
@@ -211,15 +242,34 @@ class _Builder:
         flush()
         return chunks
 
+    def tokens_between(self, first: int, last: int) -> int:
+        """Tokens of the canonical text from block `first` through block `last`."""
+        return estimate_tokens(self.canon[self.spans[first][0] : self.spans[last][1]])
+
     def joins(self, pending: list[int], i: int) -> bool:
-        """May block i join the chunk being built? Within the target, or an intro and its list."""
-        joined = estimate_tokens(
-            self.canon[self.spans[pending[0]][0] : self.spans[i][1]]
-        )
+        """May block i join the chunk being built? Within the target; or an intro and its list;
+        or the chunk is still under the minimum and the result stays within the max."""
+        joined = self.tokens_between(pending[0], i)
         intro = self.blocks[pending[-1]].text.rstrip().endswith(":")
-        return joined <= self.limits.target_tokens or (
-            intro and joined <= self.limits.max_tokens
+        too_small = (
+            self.tokens_between(pending[0], pending[-1]) < self.limits.min_tokens
         )
+        return (
+            joined <= self.limits.target_tokens
+            or (intro and joined <= self.limits.max_tokens)
+            or (too_small and joined <= self.limits.max_tokens)
+        )
+
+    def joins_backwards(self, previous: list[int], pending: list[int]) -> bool:
+        """A chunk under the minimum folds into the one before it when the two are made of
+        neighbouring blocks (nothing between them, so the text stays an exact slice) and the
+        result stays within the max. Pieces of a split block never qualify: they are not
+        recorded as whole blocks."""
+        if not previous or previous[-1] + 1 != pending[0]:
+            return False
+        if self.tokens_between(pending[0], pending[-1]) >= self.limits.min_tokens:
+            return False
+        return self.tokens_between(previous[0], pending[-1]) <= self.limits.max_tokens
 
     def pieces(self, i: int, kind: ChunkKind, path: list[str]) -> list[Chunk]:
         """A figure or prose block, whole if it fits, else cut into exact slices."""
@@ -281,42 +331,76 @@ class _Builder:
 
     # --- parents ---
 
-    def place(self, section: _Section, chunks: list[Chunk], out: ChunkSet) -> None:
-        """Group a section's chunks into parent windows and number everything."""
-        windows: list[list[Chunk]] = [[]]
+    def windows(self, section: _Section, chunks: list[Chunk]) -> list[_Window]:
+        """Cut a section's chunks into windows of at most `parent_max_tokens`. The first window
+        starts at the heading; a later one at its first chunk."""
+        groups: list[list[Chunk]] = [[]]
         for chunk in chunks:
-            used = sum(c.token_count for c in windows[-1])
-            if windows[-1] and used + chunk.token_count > self.limits.parent_max_tokens:
-                windows.append([])
-            windows[-1].append(chunk)
+            used = sum(c.token_count for c in groups[-1])
+            if groups[-1] and used + chunk.token_count > self.limits.parent_max_tokens:
+                groups.append([])
+            groups[-1].append(chunk)
 
-        for number, window in enumerate(windows):
-            first = number == 0
-            heading = section.heading if first else None
-            heading_block = self.blocks[heading] if heading is not None else None
+        found: list[_Window] = []
+        for number, group in enumerate(groups):
+            heading = section.heading if number == 0 else None
             if heading is not None:
                 start = self.spans[heading][0]
-            elif window:
-                start = window[0].char_start
             else:
-                start = 0
-            end = window[-1].char_end if window else self.spans[section.heading or 0][1]
-            pages = [c.page_start for c in window if c.page_start is not None]
-            page_ends = [c.page_end for c in window if c.page_end is not None]
-            if heading_block is not None and heading_block.location.page:
-                pages.append(heading_block.location.page)
-                page_ends.append(heading_block.location.page)
+                start = group[0].char_start if group else 0
+            if group:
+                end = group[-1].char_end
+            else:  # a heading with nothing under it
+                end = self.spans[section.heading or 0][1]
+            pages = [c.page_start for c in group if c.page_start is not None]
+            page_ends = [c.page_end for c in group if c.page_end is not None]
+            if heading is not None and self.blocks[heading].location.page:
+                pages.append(self.blocks[heading].location.page or 0)
+                page_ends.append(self.blocks[heading].location.page or 0)
+            found.append(
+                _Window(list(section.path), start, end, group, pages, page_ends)
+            )
+        return found
+
+    def merge_small(self, windows: list[_Window]) -> list[_Window]:
+        """Fold a window under `parent_min_tokens` into the next one (or, if it is the last,
+        into the one before) while the result stays within `parent_max_tokens`. The merged
+        parent keeps the path of its FIRST window; each chunk keeps its own `section_path`."""
+        floor, ceiling = self.limits.parent_min_tokens, self.limits.parent_max_tokens
+        if floor <= 0:
+            return windows
+        merged: list[_Window] = []
+        for window in windows:
+            if (
+                merged
+                and merged[-1].tokens < floor
+                and merged[-1].tokens + window.tokens <= ceiling
+            ):
+                merged[-1].absorb(window)
+            else:
+                merged.append(window)
+        if (
+            len(merged) > 1
+            and merged[-1].tokens < floor
+            and merged[-2].tokens + merged[-1].tokens <= ceiling
+        ):
+            merged[-2].absorb(merged.pop())
+        return merged
+
+    def emit(self, windows: list[_Window], out: ChunkSet) -> None:
+        """Number the parents and chunks, in reading order."""
+        for window in windows:
             parent = Section(
                 ordinal=len(out.parents),
-                path=list(section.path),
-                char_start=start,
-                char_end=end,
-                page_start=min(pages) if pages else None,
-                page_end=max(page_ends) if page_ends else None,
-                token_count=sum(c.token_count for c in window),
+                path=window.path,
+                char_start=window.start,
+                char_end=window.end,
+                page_start=min(window.pages) if window.pages else None,
+                page_end=max(window.page_ends) if window.page_ends else None,
+                token_count=window.tokens,
             )
             out.parents.append(parent)
-            for chunk in window:
+            for chunk in window.chunks:
                 chunk.parent_ordinal = parent.ordinal
                 chunk.ordinal = len(out.chunks)
                 out.chunks.append(chunk)
@@ -327,7 +411,9 @@ def build_chunks(
 ) -> ChunkSet:
     """Blocks in, parents and chunks out. Pure and deterministic."""
     builder = _Builder(blocks, context, limits or ChunkLimits())
-    out = ChunkSet()
+    windows: list[_Window] = []
     for section in builder.sections():
-        builder.place(section, builder.chunks_for(section), out)
+        windows += builder.windows(section, builder.chunks_for(section))
+    out = ChunkSet()
+    builder.emit(builder.merge_small(windows), out)
     return out

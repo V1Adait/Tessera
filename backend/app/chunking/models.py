@@ -26,16 +26,28 @@ class DocContext(BaseModel):
 
 class ChunkLimits(BaseModel):
     """Sizes in estimated tokens (backend.app.context.estimate_tokens: 3 characters each,
-    deliberately high). `target` is where merging stops; `max` is the hard ceiling."""
+    deliberately high).
 
+    Children:  `min` is the size below which a prose chunk is merged into a neighbour (0 = never);
+               `target` is where merging stops; `max` is the hard ceiling.
+    Parents:   `parent_min` is the size below which a parent is merged with its neighbour
+               (0 = never); `parent_max` is the ceiling for a parent.
+    Tables and figures are exempt from the minimums: a small table is still a whole table."""
+
+    min_tokens: int = Field(default=0, ge=0)
     target_tokens: int = Field(default=512, gt=0)
     max_tokens: int = Field(default=800, gt=0)
+    parent_min_tokens: int = Field(default=0, ge=0)
     parent_max_tokens: int = Field(default=3000, gt=0)
 
     @model_validator(mode="after")
     def _ordered(self) -> ChunkLimits:
-        if not self.target_tokens <= self.max_tokens <= self.parent_max_tokens:
-            raise ValueError("need target_tokens <= max_tokens <= parent_max_tokens")
+        if not self.min_tokens <= self.target_tokens <= self.max_tokens:
+            raise ValueError("need min_tokens <= target_tokens <= max_tokens")
+        if not self.max_tokens <= self.parent_max_tokens:
+            raise ValueError("need max_tokens <= parent_max_tokens")
+        if not self.parent_min_tokens <= self.parent_max_tokens:
+            raise ValueError("need parent_min_tokens <= parent_max_tokens")
         return self
 
 

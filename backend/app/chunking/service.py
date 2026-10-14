@@ -21,8 +21,10 @@ from backend.app.ingest.models import Block, Location, TableData
 
 def limits_from_settings(settings: Settings) -> ChunkLimits:
     return ChunkLimits(
+        min_tokens=settings.chunk_min_tokens,
         target_tokens=settings.chunk_target_tokens,
         max_tokens=settings.chunk_max_tokens,
+        parent_min_tokens=settings.chunk_parent_min_tokens,
         parent_max_tokens=settings.chunk_parent_max_tokens,
     )
 

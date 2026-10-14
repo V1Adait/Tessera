@@ -208,3 +208,28 @@ async def assign_document(
         block_count=await repo.count_blocks(pool, document_id),
         chunk_count=await repo.count_chunks(pool, document_id),
     )
+
+
+@router.post(
+    "/documents/{document_id}/index",
+    response_model=DocumentView,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def index_document(
+    document_id: UUID, pool: PoolDep, service: ServiceDep
+) -> DocumentView:
+    """Queue the document's chunks for the vector index again (after a failure, or a model change)."""
+    document = await _require(pool, document_id)
+    if service.indexer is None:
+        raise HTTPException(status_code=503, detail="vector indexing is not configured")
+    if document.status not in ("parsed", "needs_review"):
+        raise HTTPException(status_code=409, detail="the document has not been parsed")
+    if not await service.indexer.reindex(document_id):
+        raise HTTPException(
+            status_code=409, detail="the document is being indexed right now"
+        )
+    return _view(
+        await _require(pool, document_id),
+        block_count=await repo.count_blocks(pool, document_id),
+        chunk_count=await repo.count_chunks(pool, document_id),
+    )

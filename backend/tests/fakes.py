@@ -1,6 +1,9 @@
 """Shared test doubles: a fake model that streams like a real provider, and test settings."""
 
 import asyncio
+import math
+import re
+import zlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -175,3 +178,37 @@ class QueueFake(BaseChatModel):
             ),
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+class HashEmbedder:
+    """An embedder that needs no network: each word is hashed into a slot of a small vector,
+    so texts that share words end up close (cosine). Records every batch it was asked for, and
+    can be told to fail, or to wait on an event (to test what happens mid-indexing)."""
+
+    def __init__(self, name: str = "fake/hash-embed", dim: int = 32) -> None:
+        self.name = name
+        self.dim = dim
+        self.calls: list[list[str]] = []
+        self.error: Exception | None = None
+        self.gate: asyncio.Event | None = None
+        self.entered = asyncio.Event()
+
+    @property
+    def texts_embedded(self) -> int:
+        return sum(len(batch) for batch in self.calls)
+
+    def vector(self, text: str) -> list[float]:
+        slots = [0.0] * self.dim
+        for word in re.findall(r"[a-z0-9]+", text.lower()):
+            slots[zlib.crc32(word.encode()) % self.dim] += 1.0
+        norm = math.sqrt(sum(x * x for x in slots)) or 1.0
+        return [x / norm for x in slots]
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        self.entered.set()
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.error is not None:
+            raise self.error
+        return [self.vector(t) for t in texts]

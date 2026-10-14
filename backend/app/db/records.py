@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["streaming", "complete", "stopped", "error"]
-TraceKind = Literal["chat", "summary", "classify", "extract", "plan"]
+TraceKind = Literal["chat", "summary", "classify", "extract", "plan", "embed"]
 TraceStatus = Literal["ok", "error", "rejected", "cancelled"]
 DocumentStatus = Literal[
     "uploaded", "parsing", "parsed", "needs_review", "needs_ocr", "failed"
@@ -105,6 +105,9 @@ class TraceRecord(BaseModel):
     created_at: datetime | None = None  # filled in by the database
 
 
+IndexStatus = Literal["pending", "indexing", "indexed", "failed"]
+
+
 class DocumentRecord(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -121,6 +124,10 @@ class DocumentRecord(BaseModel):
     report: dict[str, Any]
     created_at: datetime
     parsed_at: datetime | None
+    index_status: IndexStatus = "pending"  # are its chunks in the vector index?
+    index_detail: str | None = None
+    indexed_model: str | None = None
+    indexed_at: datetime | None = None
 
 
 class BlockRecord(BaseModel):

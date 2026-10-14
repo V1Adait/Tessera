@@ -50,11 +50,38 @@ class Settings(BaseSettings):
     summary_input_max_tokens: int = 60_000  # most history folded in by one summary call
 
     # Chunking: sizes in estimated tokens (3 characters each). See backend/app/chunking/.
+    chunk_min_tokens: int = (
+        100  # a prose chunk smaller than this is merged into a neighbour
+    )
     chunk_target_tokens: int = 512  # merging small blocks stops here
     chunk_max_tokens: int = 800  # hard ceiling for one chunk
+    chunk_parent_min_tokens: int = (
+        300  # a parent smaller than this merges with a neighbour
+    )
     chunk_parent_max_tokens: int = (
         3000  # a section bigger than this is cut into windows
     )
+    # Retrieval: how many parents are read after a search. Hits in one parent count once.
+    retrieval_max_parents: int = 5
+
+    # Embeddings: vectors live in Qdrant (embedded in a local folder unless QDRANT_URL is set);
+    # Postgres stays the source of truth. See backend/app/embeddings/.
+    embeddings_enabled: bool = True
+    embedding_model: str = (
+        "openai/text-embedding-3-small"  # any id from OpenRouter's list
+    )
+    embedding_batch_size: int = 64  # texts per request
+    embedding_timeout_s: float = 30.0
+    embedding_max_chars: int = (
+        24_000  # longer search text is cut for indexing (and counted)
+    )
+    embedding_max_chunks_per_document: int = 5000  # a guard on cost: more is refused
+    embedding_max_concurrent_indexes: int = 2
+    index_on_startup: bool = True  # index parsed documents that are still waiting
+    qdrant_url: str | None = None
+    qdrant_api_key: str | None = None  # from the environment, never committed
+    qdrant_path: str = "data/qdrant"
+    qdrant_collection_prefix: str = "chunks"
 
     # Query handling: classify the question, then plan it. See backend/app/query/.
     router_jev_model: str = "typesafe/jev-1.13"  # pinned: an alias would move under us

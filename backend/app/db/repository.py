@@ -462,7 +462,8 @@ async def create_document(
             INSERT INTO documents (workspace_id, entity_id, filename, kind, sha256, size_bytes)
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
-                      status_detail, parser, page_count, char_count, report, created_at, parsed_at
+                      status_detail, parser, page_count, char_count, report, created_at, parsed_at,
+               index_status, index_detail, indexed_model, indexed_at
             """,
             workspace_id,
             entity_id,
@@ -475,7 +476,8 @@ async def create_document(
         existing = await db.fetchrow(
             """
             SELECT id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
-                   status_detail, parser, page_count, char_count, report, created_at, parsed_at
+                   status_detail, parser, page_count, char_count, report, created_at, parsed_at,
+               index_status, index_detail, indexed_model, indexed_at
             FROM documents WHERE workspace_id = $1 AND sha256 = $2
             """,
             workspace_id,
@@ -492,7 +494,8 @@ async def get_document(db: Db, document_id: UUID) -> DocumentRecord | None:
     row = await db.fetchrow(
         """
         SELECT id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
-               status_detail, parser, page_count, char_count, report, created_at, parsed_at
+               status_detail, parser, page_count, char_count, report, created_at, parsed_at,
+               index_status, index_detail, indexed_model, indexed_at
         FROM documents WHERE id = $1
         """,
         document_id,
@@ -511,7 +514,8 @@ async def list_documents(
     rows = await db.fetch(
         """
         SELECT id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
-               status_detail, parser, page_count, char_count, report, created_at, parsed_at
+               status_detail, parser, page_count, char_count, report, created_at, parsed_at,
+               index_status, index_detail, indexed_model, indexed_at
         FROM documents
         WHERE workspace_id = $1 AND ($2::uuid IS NULL OR entity_id = $2)
         ORDER BY created_at DESC, id
@@ -545,7 +549,8 @@ async def claim_for_parsing(db: Db, document_id: UUID) -> DocumentRecord | None:
         UPDATE documents SET status = 'parsing', status_detail = NULL
         WHERE id = $1 AND status <> 'parsing'
         RETURNING id, workspace_id, entity_id, filename, kind, sha256, size_bytes, status,
-                  status_detail, parser, page_count, char_count, report, created_at, parsed_at
+                  status_detail, parser, page_count, char_count, report, created_at, parsed_at,
+               index_status, index_detail, indexed_model, indexed_at
         """,
         document_id,
     )
@@ -638,7 +643,8 @@ async def save_parse_result(
             """
             UPDATE documents
             SET status = $2, status_detail = $3, parser = $4, page_count = $5,
-                char_count = $6, report = $7::jsonb, parsed_at = now()
+                char_count = $6, report = $7::jsonb, parsed_at = now(),
+                index_status = 'pending', index_detail = NULL
             WHERE id = $1
             """,
             document_id,
@@ -775,6 +781,10 @@ async def save_chunks(
     assigned to an entity, which changes the search text). One transaction."""
     async with pool.acquire() as conn, conn.transaction():
         await replace_chunks(conn, document_id, chunk_set)
+        await conn.execute(
+            "UPDATE documents SET index_status = 'pending', index_detail = NULL WHERE id = $1",
+            document_id,
+        )
 
 
 async def list_chunks(
@@ -874,3 +884,132 @@ async def search_chunks_text(
         ChunkHit(chunk=_chunk(r), filename=r["filename"], score=float(r["score"]))
         for r in rows
     ]
+
+
+async def get_sections(db: Db, section_ids: list[UUID]) -> list[SectionRecord]:
+    rows = await db.fetch(
+        """
+        SELECT id, document_id, ordinal, path, char_start, char_end, page_start, page_end,
+               token_count
+        FROM document_sections WHERE id = ANY($1::uuid[])
+        """,
+        section_ids,
+    )
+    return [SectionRecord(**dict(r)) for r in rows]
+
+
+# --- the vector index: per-document state ----------------------------------------------------
+
+
+async def claim_for_indexing(db: Db, document_id: UUID) -> bool:
+    """pending -> indexing, atomically. True means THIS worker owns the job; False means someone
+    else has it, it is already indexed, or the document is not ready (not parsed yet)."""
+    result = await db.execute(
+        """
+        UPDATE documents SET index_status = 'indexing', index_detail = NULL
+        WHERE id = $1 AND index_status = 'pending' AND status IN ('parsed', 'needs_review')
+        """,
+        document_id,
+    )
+    return result == "UPDATE 1"
+
+
+async def set_index_result(
+    db: Db,
+    document_id: UUID,
+    status: str,
+    detail: str | None = None,
+    model: str | None = None,
+) -> bool:
+    """Record how indexing ended. Only applies while the document is still 'indexing': if it was
+    re-parsed meanwhile (back to 'pending'), that newer state wins and False is returned."""
+    result = await db.execute(
+        """
+        UPDATE documents
+        SET index_status = $2, index_detail = $3,
+            indexed_model = CASE WHEN $2 = 'indexed' THEN $4 ELSE indexed_model END,
+            indexed_at = CASE WHEN $2 = 'indexed' THEN now() ELSE indexed_at END
+        WHERE id = $1 AND index_status = 'indexing'
+        """,
+        document_id,
+        status,
+        detail,
+        model,
+    )
+    return result == "UPDATE 1"
+
+
+async def release_indexing(db: Db, document_id: UUID) -> None:
+    """Put a document we were indexing back to 'pending' (shutdown, cancellation)."""
+    await db.execute(
+        "UPDATE documents SET index_status = 'pending' WHERE id = $1 AND index_status = 'indexing'",
+        document_id,
+    )
+
+
+async def recover_interrupted_indexing(db: Db) -> int:
+    """At startup: documents left 'indexing' by a crash go back to 'pending'."""
+    result = await db.execute(
+        "UPDATE documents SET index_status = 'pending' WHERE index_status = 'indexing'"
+    )
+    return int(result.split()[-1])
+
+
+async def list_documents_to_index(db: Db, limit: int = 1000) -> list[UUID]:
+    rows = await db.fetch(
+        """
+        SELECT id FROM documents
+        WHERE index_status = 'pending' AND status IN ('parsed', 'needs_review')
+        ORDER BY created_at LIMIT $1
+        """,
+        limit,
+    )
+    return [r["id"] for r in rows]
+
+
+async def all_chunks(db: Db, document_id: UUID) -> list[ChunkRecord]:
+    """Every chunk of a document, in order (paged so one query never grows without bound)."""
+    found: list[ChunkRecord] = []
+    while True:
+        page = await list_chunks(db, document_id, limit=500, offset=len(found))
+        found += page
+        if len(page) < 500:
+            return found
+
+
+async def chunks_in_workspace(
+    db: Db, workspace_id: UUID, chunk_ids: list[UUID]
+) -> dict[UUID, tuple[ChunkRecord, str]]:
+    """These chunks with their document's file name, but only those whose document is in this
+    workspace. A vector hit is never trusted on its own: Postgres has the last word on scope."""
+    rows = await db.fetch(
+        f"""
+        SELECT {_CHUNK_COLUMNS}, d.filename
+        FROM document_chunks c JOIN documents d ON d.id = c.document_id
+        WHERE c.id = ANY($1::uuid[]) AND d.workspace_id = $2
+        """,
+        chunk_ids,
+        workspace_id,
+    )
+    return {r["id"]: (_chunk(r), r["filename"]) for r in rows}
+
+
+async def document_scope(db: Db, document_id: UUID) -> tuple[UUID, UUID | None] | None:
+    """(workspace_id, entity_id) of a document, or None if it does not exist."""
+    row = await db.fetchrow(
+        "SELECT workspace_id, entity_id FROM documents WHERE id = $1", document_id
+    )
+    return (row["workspace_id"], row["entity_id"]) if row else None
+
+
+async def mark_pending_index(db: Db, document_id: UUID) -> bool:
+    """Ask for (re)indexing: any state except 'indexing' goes back to 'pending'. False if the
+    document does not exist or is being indexed right now."""
+    result = await db.execute(
+        """
+        UPDATE documents SET index_status = 'pending', index_detail = NULL
+        WHERE id = $1 AND index_status <> 'indexing'
+        """,
+        document_id,
+    )
+    return result == "UPDATE 1"
