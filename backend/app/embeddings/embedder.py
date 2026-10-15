@@ -154,6 +154,9 @@ class OpenRouterEmbedder:
                     model=self.name,
                     tokens_in=tokens,
                     cost_usd=cost,
+                    cost_source="provider"
+                    if cost is not None
+                    else ("unknown" if tokens else None),
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     error_code=code,
                 )

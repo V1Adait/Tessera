@@ -145,6 +145,9 @@ class JevClassifier:
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     cost_usd=cost,
+                    cost_source="provider"
+                    if cost is not None
+                    else ("unknown" if tokens_in else None),
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     error_code=code,
                 )

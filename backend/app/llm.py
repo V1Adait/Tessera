@@ -33,9 +33,13 @@ def get_llm(
     model: str | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    seed: int | None = None,
 ) -> BaseChatModel:
     """Build a chat model. With no overrides it is the main chat model from the settings; the
-    keyword arguments let another task (such as summarising) use a different model."""
+    keyword arguments let another task (such as summarising) use a different model.
+
+    `temperature=0` and `seed` are requests, not guarantees: some models ignore them and answer
+    differently every time. Check a model with eval/probe_determinism.py before relying on it."""
     # The validator in Settings guarantees a provider is set; this narrows the type for mypy.
     chosen = provider or settings.provider
     assert chosen is not None
@@ -66,6 +70,7 @@ def get_llm(
             timeout=settings.request_timeout,
             max_retries=settings.max_retries,
             temperature=temp,
+            seed=seed,
             stream_usage=True,
         )
 
@@ -77,6 +82,7 @@ def get_llm(
             timeout=settings.request_timeout,
             max_retries=settings.max_retries,
             temperature=temp,
+            seed=seed,
             base_url="https://openrouter.ai/api/v1",
             stream_usage=True,
         )

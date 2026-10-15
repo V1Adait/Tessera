@@ -22,6 +22,7 @@ from langchain_core.language_models import BaseChatModel
 from backend.app import pipeline
 from backend.app.config import Settings
 from backend.app.context import BuiltContext, estimate_tokens
+from backend.app.costs import Cost, get_price_book, resolve_cost
 from backend.app.db import repository as repo
 from backend.app.db.records import (
     MessageStatus,
@@ -202,6 +203,25 @@ class _Outcome:
     first_token_ms: int | None
 
 
+def _turn_cost(settings: Settings, done: Done | None, text: str) -> Cost | None:
+    """What a chat turn cost. Streamed responses carry no provider-reported cost, so a finished turn
+    is priced from its token counts (labelled 'computed'). A turn that stopped part-way but had
+    already produced text was still billed by the provider for it, so it is 'unknown', never free.
+    A turn that never reached the model costs nothing and has no cost at all."""
+    if done is not None:
+        return resolve_cost(
+            reported=None,
+            book=get_price_book(),
+            provider=settings.provider,
+            model=settings.default_model,
+            tokens_in=done.usage.tokens_in,
+            tokens_out=done.usage.tokens_out,
+        )
+    if text:
+        return Cost(None, "unknown")
+    return None
+
+
 def _classify(
     outcome: _Outcome,
 ) -> tuple[TraceStatus, MessageStatus | None, str | None]:
@@ -224,6 +244,7 @@ async def _record(
     """Write the assistant message, trim event and trace in ONE transaction. Never raises."""
     trace_status, message_status, error_code = _classify(outcome)
     done = outcome.terminal if isinstance(outcome.terminal, Done) else None
+    cost = _turn_cost(settings, done, outcome.text)
     try:
         async with pool.acquire() as conn, conn.transaction():
             if message_status is not None:
@@ -259,6 +280,8 @@ async def _record(
                     prompt_version=PROMPT_VERSION,
                     tokens_in=done.usage.tokens_in if done else None,
                     tokens_out=done.usage.tokens_out if done else None,
+                    cost_usd=cost.usd if cost else None,
+                    cost_source=cost.source if cost else None,
                     latency_ms=outcome.latency_ms,
                     first_token_ms=outcome.first_token_ms,
                     error_code=error_code,

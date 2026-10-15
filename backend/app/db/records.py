@@ -10,6 +10,7 @@ from pydantic import BaseModel
 MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["streaming", "complete", "stopped", "error"]
 TraceKind = Literal["chat", "summary", "classify", "extract", "plan", "embed"]
+CostSource = Literal["provider", "computed", "unknown"]
 TraceStatus = Literal["ok", "error", "rejected", "cancelled"]
 DocumentStatus = Literal[
     "uploaded", "parsing", "parsed", "needs_review", "needs_ocr", "failed"
@@ -99,6 +100,9 @@ class TraceRecord(BaseModel):
     tokens_in: int | None = None
     tokens_out: int | None = None
     cost_usd: Decimal | None = None
+    cost_source: CostSource | None = (
+        None  # provider | computed | unknown; None = no paid call
+    )
     latency_ms: int | None = None
     first_token_ms: int | None = None
     error_code: str | None = None

@@ -9,11 +9,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router
+from backend.app.api_costs import router as costs_router
 from backend.app.api_documents import router as documents_router
+from backend.app.api_matrix import router as matrix_router
 from backend.app.api_query import router as query_router
 from backend.app.api_search import router as search_router
 from backend.app.api_workspaces import router as workspaces_router
 from backend.app.config import Settings, get_settings
+from backend.app.costs import PriceBook, fetch_openrouter_prices, set_price_book
 from backend.app.db import repository as repo
 from backend.app.db.migrate import pending_migrations
 from backend.app.db.pool import create_pool
@@ -22,7 +25,9 @@ from backend.app.embeddings.embedder import OpenRouterEmbedder, make_embedding_c
 from backend.app.embeddings.indexer import Indexer
 from backend.app.embeddings.store import QdrantStore, make_qdrant_client
 from backend.app.llm import get_default_llm
+from backend.app.matrix.service import build_matrix_service
 from backend.app.query.service import build_query_service
+from backend.app.retrieval.sparse import Bm25Encoder
 from backend.app.tracing import db_recorder
 
 logging.basicConfig(
@@ -54,7 +59,20 @@ def build_indexer(pool: asyncpg.Pool, settings: Settings) -> Indexer | None:
         model=settings.embedding_model,
         payload_indexes=bool(settings.qdrant_url),
     )
-    return Indexer(pool, settings, embedder, store)
+    sparse = Bm25Encoder(settings.sparse_model, cache_dir=settings.sparse_cache_dir)
+    return Indexer(pool, settings, embedder, store, sparse)
+
+
+async def load_prices(settings: Settings, log: logging.Logger) -> None:
+    """The price list used to cost calls the provider does not price itself (streamed chat).
+    OpenRouter's public list, with any prices set in the settings taking precedence. If the list
+    cannot be fetched the app still starts; such calls are recorded with an unknown cost."""
+    book = (
+        await fetch_openrouter_prices() if settings.fetch_model_prices else PriceBook()
+    )
+    book = book.merged(PriceBook.from_per_million(settings.model_prices))
+    set_price_book(book)
+    log.info("price list: %s models", len(book))
 
 
 @asynccontextmanager
@@ -65,11 +83,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     get_default_llm()
     log.info("started: provider=%s model=%s", settings.provider, settings.default_model)
+    await load_prices(settings, log)
 
     app.state.pool = None
     app.state.documents = None
     app.state.query = None
     app.state.indexer = None
+    app.state.matrix = None
     if settings.database_url:
         pool = await create_pool(settings)
         pending = await pending_migrations(pool)
@@ -83,6 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         indexer = build_indexer(pool, settings)
         app.state.indexer = indexer
         app.state.documents = DocumentService(pool, settings, indexer=indexer)
+        app.state.matrix = build_matrix_service(pool, settings, indexer)
         app.state.query = build_query_service(pool, settings)
         interrupted = await repo.recover_interrupted(pool)
         if interrupted:
@@ -123,11 +144,13 @@ app.add_middleware(
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-Conversation-ID"],
+    expose_headers=["X-Request-ID", "X-Conversation-ID", "X-Retrieval-Degraded"],
 )
 
 app.include_router(router)
 app.include_router(workspaces_router)
 app.include_router(documents_router)
 app.include_router(query_router)
+app.include_router(matrix_router)
+app.include_router(costs_router)
 app.include_router(search_router)

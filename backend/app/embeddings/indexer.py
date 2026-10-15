@@ -27,6 +27,8 @@ from backend.app.db.records import ChunkHit, ChunkRecord
 from backend.app.embeddings.embedder import Embedder, EmbeddingError, embed_in_batches
 from backend.app.embeddings.search import vector_search
 from backend.app.embeddings.store import QdrantStore, VectorPoint
+from backend.app.retrieval.hybrid import HybridResult, hybrid_search, keyword_search
+from backend.app.retrieval.sparse import SparseEncoder, SparseError
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +57,13 @@ class Indexer:
         settings: Settings,
         embedder: Embedder,
         store: QdrantStore,
+        sparse: SparseEncoder,
     ) -> None:
         self._pool = pool
         self._settings = settings
         self._embedder = embedder
         self._store = store
+        self._sparse = sparse
         self._slots = asyncio.Semaphore(
             max(1, settings.embedding_max_concurrent_indexes)
         )
@@ -116,6 +120,49 @@ class Indexer:
             limit=limit,
         )
 
+    async def hybrid_search(
+        self,
+        workspace_id: UUID,
+        query: str,
+        *,
+        entity_ids: list[UUID] | None = None,
+        limit: int = 10,
+        **tuning: float,
+    ) -> HybridResult:
+        """BM25 keyword search + dense vector search merged with RRF. `tuning` passes k /
+        dense_weight / sparse_weight through (the eval uses it). Degrades, never raises, when one
+        side fails."""
+        return await hybrid_search(
+            self._pool,
+            self._embedder,
+            self._sparse,
+            self._store,
+            workspace_id,
+            query,
+            entity_ids=entity_ids,
+            limit=limit,
+            **tuning,  # type: ignore[arg-type]
+        )
+
+    async def keyword_search(
+        self,
+        workspace_id: UUID,
+        query: str,
+        *,
+        entity_ids: list[UUID] | None = None,
+        limit: int = 10,
+    ) -> list[ChunkHit]:
+        """BM25 alone: chunks that contain the question's words. Raises SparseError."""
+        return await keyword_search(
+            self._pool,
+            self._sparse,
+            self._store,
+            workspace_id,
+            query,
+            entity_ids=entity_ids,
+            limit=limit,
+        )
+
     async def reindex(self, document_id: UUID) -> bool:
         """Index again from scratch of the document's state (for example after a model change).
         False if the document is unknown or being indexed right now."""
@@ -140,6 +187,15 @@ class Indexer:
                 )
                 reason = exc.message if exc.code == "too_large" else _REASONS[exc.code]
                 return await self._finish(document_id, "failed", reason)
+            except SparseError as exc:
+                logger.warning(
+                    "indexing %s failed: keyword encoder (%s)", document_id, exc.code
+                )
+                return await self._finish(
+                    document_id,
+                    "failed",
+                    "the keyword encoder could not run; retry later",
+                )
             except asyncio.CancelledError:
                 await repo.release_indexing(self._pool, document_id)
                 raise
@@ -181,6 +237,12 @@ class Indexer:
         vectors, cut = await self._vectors_for(
             chunks, {p.content_hash: p.vector for p in stored}
         )
+        # Keyword vectors are computed here, on this machine: no network, no cost, so there is
+        # nothing worth reusing from the index.
+        cap = self._settings.embedding_max_chars
+        keywords = await self._sparse.encode_documents(
+            [c.search_text[:cap] for c in chunks]
+        )
 
         points = [
             VectorPoint(
@@ -192,8 +254,9 @@ class Indexer:
                 section_id=c.section_id,
                 kind=c.kind,
                 content_hash=c.content_hash,
+                sparse=sparse,
             )
-            for c in chunks
+            for c, sparse in zip(chunks, keywords, strict=True)
         ]
         await self._store.upsert(points)
         keep = {c.id for c in chunks}

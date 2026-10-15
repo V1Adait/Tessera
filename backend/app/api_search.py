@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from backend.app.db import repository as repo
@@ -16,6 +16,7 @@ from backend.app.db.pool import get_pool
 from backend.app.db.records import ChunkHit
 from backend.app.embeddings.embedder import EmbeddingError
 from backend.app.embeddings.indexer import Indexer
+from backend.app.retrieval.sparse import SparseError
 
 router = APIRouter(tags=["search"])
 
@@ -60,11 +61,16 @@ async def search(
     pool: PoolDep,
     indexer: IndexerDep,
     q: Annotated[str, Query(min_length=1, max_length=500)],
-    mode: Literal["text", "vector"] = "text",
+    response: Response,
+    mode: Literal["text", "vector", "bm25", "hybrid"] = "hybrid",
     entity_id: Annotated[list[UUID] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> list[SearchHit]:
-    """Chunks matching `q` inside one workspace, optionally limited to some entities."""
+    """Chunks matching `q` inside one workspace, optionally limited to some entities.
+
+    mode=hybrid (the default) merges BM25 keyword results and vector results; if one side is
+    down it returns the other's results and says so in the X-Retrieval-Degraded header.
+    mode=text is the older Postgres full-text search, kept for comparison and as a last resort."""
     if await repo.get_workspace(pool, workspace_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
     if mode == "text":
@@ -74,14 +80,28 @@ async def search(
         return [_hit(h) for h in hits]
     if indexer is None:
         raise HTTPException(status_code=503, detail="vector search is not configured")
+    if mode == "hybrid":
+        result = await indexer.hybrid_search(
+            workspace_id, q, entity_ids=entity_id, limit=limit
+        )
+        if result.degraded:
+            response.headers["X-Retrieval-Degraded"] = result.degraded
+        return [_hit(h) for h in result.hits]
     try:
-        return [
-            _hit(h)
-            for h in await indexer.search(
+        if mode == "bm25":
+            found = await indexer.keyword_search(
                 workspace_id, q, entity_ids=entity_id, limit=limit
             )
-        ]
+        else:
+            found = await indexer.search(
+                workspace_id, q, entity_ids=entity_id, limit=limit
+            )
+        return [_hit(h) for h in found]
     except EmbeddingError:
         raise HTTPException(
             status_code=503, detail="the embedding service is unavailable"
+        ) from None
+    except SparseError:
+        raise HTTPException(
+            status_code=503, detail="the keyword search is unavailable"
         ) from None

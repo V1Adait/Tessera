@@ -32,6 +32,7 @@ from backend.app.context import (
     needs_summary,
     plan_summary,
 )
+from backend.app.costs import Cost, get_price_book, reported_cost, resolve_cost
 from backend.app.db import repository as repo
 from backend.app.db.records import StoredSummary, TraceRecord
 from backend.app.llm import classify_error
@@ -97,17 +98,33 @@ class _Generated:
     text: str
     tokens_in: int | None
     tokens_out: int | None
+    cost: Cost
 
 
 async def _generate(
-    llm: BaseChatModel, previous: str | None, messages: list[Message]
+    llm: BaseChatModel,
+    previous: str | None,
+    messages: list[Message],
+    *,
+    provider: str,
+    model: str,
 ) -> _Generated:
     reply = await llm.ainvoke(build_summary_prompt(previous, messages))
     usage = reply.usage_metadata  # type: ignore[attr-defined]  # present on AIMessage
+    tokens_in = usage["input_tokens"] if usage else None
+    tokens_out = usage["output_tokens"] if usage else None
     return _Generated(
         text=str(reply.text).strip(),
-        tokens_in=usage["input_tokens"] if usage else None,
-        tokens_out=usage["output_tokens"] if usage else None,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cost=resolve_cost(
+            reported=reported_cost(getattr(reply, "response_metadata", None)),
+            book=get_price_book(),
+            provider=provider,
+            model=model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+        ),
     )
 
 
@@ -180,7 +197,13 @@ async def _summarise(
     }
 
     try:
-        generated = await _generate(llm, previous.content if previous else None, folded)
+        generated = await _generate(
+            llm,
+            previous.content if previous else None,
+            folded,
+            provider=settings.summary_provider,
+            model=settings.summary_model,
+        )
     except Exception as exc:  # noqa: BLE001 - any provider failure becomes a trace row
         code, _, _ = classify_error(exc)
         logger.warning(
@@ -211,6 +234,8 @@ async def _summarise(
                 error_code=problem,
                 tokens_in=generated.tokens_in,
                 tokens_out=generated.tokens_out,
+                cost_usd=generated.cost.usd,
+                cost_source=generated.cost.source,
                 latency_ms=latency_ms,
             ),
         )
@@ -271,6 +296,8 @@ async def _store(
                     status="ok",
                     tokens_in=generated.tokens_in,
                     tokens_out=generated.tokens_out,
+                    cost_usd=generated.cost.usd,
+                    cost_source=generated.cost.source,
                     latency_ms=latency_ms,
                 ),
             )

@@ -240,16 +240,21 @@ class _Walker:
         return self.counter
 
     def units_context(self, table: Tag, rows: list[list[str]]) -> str:
+        """The text that may say "(in millions)", NEAREST FIRST (the first match wins): the table's
+        own header rows, its caption, then the end of the paragraph just above it. SEC tables put
+        the units in the second header row ("Amount(in millions)") as often as in the first."""
+        caption = table.find("caption")
+        header = " ".join(" ".join(row) for row in rows[:3])
         previous = ""
         if self.builder.blocks and self.builder.blocks[-1].type in {
             "paragraph",
             "heading",
         }:
-            previous = self.builder.blocks[-1].text[:300]
-        caption = table.find("caption")
-        first_row = " ".join(rows[0]) if rows else ""
+            previous = self.builder.blocks[-1].text[
+                -300:
+            ]  # the end: closest to the table
         return " ".join(
-            [previous, _text_of(caption) if isinstance(caption, Tag) else "", first_row]
+            [header, _text_of(caption) if isinstance(caption, Tag) else "", previous]
         )
 
     def walk(self, node: Tag, list_level: int = 0) -> None:

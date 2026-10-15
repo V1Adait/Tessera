@@ -9,11 +9,14 @@ Values always go through $1, $2 placeholders, never into the SQL text.
 """
 
 import json
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 import asyncpg
 from asyncpg.pool import PoolConnectionProxy
+from pydantic import BaseModel
 
 from backend.app.chunking.models import ChunkSet
 from backend.app.db.records import (
@@ -345,9 +348,9 @@ async def record_trace(db: Db, trace: TraceRecord) -> None:
     await db.execute(
         """
         INSERT INTO traces (request_id, conversation_id, kind, provider, model, prompt_version,
-                            tokens_in, tokens_out, cost_usd, latency_ms, first_token_ms,
-                            status, error_code)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                            tokens_in, tokens_out, cost_usd, cost_source, latency_ms,
+                            first_token_ms, status, error_code)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         """,
         trace.request_id,
         trace.conversation_id,
@@ -358,6 +361,7 @@ async def record_trace(db: Db, trace: TraceRecord) -> None:
         trace.tokens_in,
         trace.tokens_out,
         trace.cost_usd,
+        trace.cost_source,
         trace.latency_ms,
         trace.first_token_ms,
         trace.status,
@@ -372,7 +376,8 @@ async def list_traces(
     rows = await db.fetch(
         """
         SELECT request_id, conversation_id, kind, provider, model, prompt_version, tokens_in,
-               tokens_out, cost_usd, latency_ms, first_token_ms, status, error_code, created_at
+               tokens_out, cost_usd, cost_source, latency_ms, first_token_ms, status, error_code,
+               created_at
         FROM traces
         WHERE ($1::uuid IS NULL OR conversation_id = $1)
         ORDER BY created_at DESC, request_id
@@ -1013,3 +1018,37 @@ async def mark_pending_index(db: Db, document_id: UUID) -> bool:
         document_id,
     )
     return result == "UPDATE 1"
+
+
+class CostLine(BaseModel):
+    """Spend for one kind of call and model over a period."""
+
+    kind: str
+    model: str | None
+    calls: int
+    unknown_cost_calls: (
+        int  # paid calls whose cost could not be worked out: NOT counted as free
+    )
+    estimated_calls: int  # calls whose cost is computed from prices, not reported
+    cost_usd: Decimal
+    tokens_in: int
+    tokens_out: int
+
+
+async def cost_summary(db: Db, since: datetime) -> list[CostLine]:
+    """What was spent since `since`, by kind of call and model, biggest first."""
+    rows = await db.fetch(
+        """
+        SELECT kind, model, count(*) AS calls,
+               count(*) FILTER (WHERE cost_source = 'unknown') AS unknown_cost_calls,
+               count(*) FILTER (WHERE cost_source = 'computed') AS estimated_calls,
+               coalesce(sum(cost_usd), 0) AS cost_usd,
+               coalesce(sum(tokens_in), 0)::bigint AS tokens_in,
+               coalesce(sum(tokens_out), 0)::bigint AS tokens_out
+        FROM traces WHERE created_at >= $1
+        GROUP BY kind, model
+        ORDER BY cost_usd DESC, kind, model
+        """,
+        since,
+    )
+    return [CostLine(**dict(r)) for r in rows]

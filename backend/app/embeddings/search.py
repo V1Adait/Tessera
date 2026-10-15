@@ -31,7 +31,7 @@ async def vector_search(
 ) -> list[ChunkHit]:
     """Raises EmbeddingError if the query cannot be embedded."""
     [vector] = await embedder.embed([query])
-    found = await store.search(
+    found = await store.search_dense(
         vector, workspace_id=workspace_id, entity_ids=entity_ids, limit=limit
     )
     if not found:

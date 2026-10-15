@@ -8,13 +8,13 @@ import json
 import logging
 import re
 import time
-from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 
+from backend.app.costs import Cost, get_price_book, reported_cost, resolve_cost
 from backend.app.db.records import TraceKind, TraceRecord
 from backend.app.llm import classify_error
 from backend.app.tracing import Recorder
@@ -77,6 +77,14 @@ async def ask_json(
         )
         raise ModelCallError(code, f"{kind} model call failed") from exc
 
+    cost = resolve_cost(
+        reported=reported_cost(getattr(reply, "response_metadata", None)),
+        book=get_price_book(),
+        provider=provider,
+        model=model,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+    )
     await _record(
         recorder,
         kind,
@@ -87,6 +95,7 @@ async def ask_json(
         started,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        cost=cost,
     )
     return parse_json_object(str(reply.text))
 
@@ -103,7 +112,7 @@ async def _record(
     code: str | None = None,
     tokens_in: int | None = None,
     tokens_out: int | None = None,
-    cost_usd: Decimal | None = None,
+    cost: Cost | None = None,
 ) -> None:
     await recorder(
         TraceRecord(
@@ -115,7 +124,8 @@ async def _record(
             prompt_version=prompt_version,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            cost_usd=cost_usd,
+            cost_usd=cost.usd if cost else None,
+            cost_source=cost.source if cost else None,
             latency_ms=int((time.perf_counter() - started) * 1000),
             error_code=code,
         )

@@ -81,10 +81,41 @@ class Settings(BaseSettings):
     qdrant_url: str | None = None
     qdrant_api_key: str | None = None  # from the environment, never committed
     qdrant_path: str = "data/qdrant"
+    sparse_model: str = (
+        "Qdrant/bm25"  # keyword (BM25) encoder, run locally via fastembed
+    )
+    sparse_cache_dir: str = "data/fastembed"  # where its small one-off download is kept
     qdrant_timeout_s: float = (
         30.0  # the client default (5 s) is too short for big batches
     )
     qdrant_collection_prefix: str = "chunks"
+
+    # Cost tracing: see costs.py. Prices come from OpenRouter's public list; add your own for models
+    # it does not cover, as {"model-id": [usd_per_million_input_tokens, usd_per_million_output_tokens]}.
+    fetch_model_prices: bool = True
+    model_prices: dict[str, tuple[float, float]] = {}
+
+    # Matrix cells: fill one cell from retrieved text, then check the answer in code.
+    extract_provider: Provider = "openrouter"
+    # Chosen on the Apple 10-K eval (20 columns, 3 runs): 15 of 17 answerable columns right, 0 wrong
+    # values, 3 of 3 absent facts reported not_found, ~$0.0008 per cell. It IGNORES temperature 0
+    # (see eval/probe_determinism.py), so repeat runs can differ; the checks in code and, later, the
+    # result cache are what keep cells steady. gemini-2.5-flash-lite was perfectly repeatable and
+    # ~3x cheaper but gave 2 wrong values before two safety-net fixes: worth re-testing.
+    extract_model: str = "anthropic/claude-haiku-5.5"
+    extract_max_tokens: int = 700  # the reply is a short JSON object
+    extract_seed: int | None = (
+        7  # asked of providers that honour it; see eval/probe_determinism.py
+    )
+    extract_candidates: int = (
+        30  # chunks retrieved before they are grouped into parents
+    )
+    extract_context_tokens: int = (
+        12_000  # most text from the documents put in one prompt
+    )
+    extract_low_confidence: float = (
+        0.7  # evidence from a chunk at or below this is not trusted
+    )
 
     # Query handling: classify the question, then plan it. See backend/app/query/.
     router_jev_model: str = "typesafe/jev-1.13"  # pinned: an alias would move under us
