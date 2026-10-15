@@ -23,8 +23,14 @@ from backend.app.embeddings.embedder import EmbeddingError
 from backend.app.embeddings.indexer import Indexer
 from backend.app.embeddings.store import QdrantStore
 from backend.app.main import app
+from backend.app.retrieval.sparse import SparseError
 from backend.tests import make_files as mf
-from backend.tests.fakes import HashEmbedder, make_settings
+from backend.tests.fakes import (
+    FakeSparse,
+    HashEmbedder,
+    drop_test_collections,
+    make_settings,
+)
 from backend.tests.test_chunks_db import reader, wait_final
 
 FINAL = {"parsed", "needs_review", "needs_ocr", "failed"}
@@ -48,6 +54,11 @@ def embedder():
     return HashEmbedder()
 
 
+@pytest.fixture
+def sparse():
+    return FakeSparse()
+
+
 @pytest.fixture(params=["memory", "server"])
 async def store(request):
     """Every indexer test runs on embedded Qdrant and, when one is reachable, on a real server
@@ -67,15 +78,13 @@ async def store(request):
         client, prefix=prefix, model="fake/hash-embed", payload_indexes=True
     )
     yield s
-    for c in (await client.get_collections()).collections:
-        if c.name.startswith(prefix):
-            await client.delete_collection(c.name)
+    await drop_test_collections(client, prefix)
     await s.close()
 
 
 @pytest.fixture
-async def indexer(pool, settings, embedder, store):
-    ix = Indexer(pool, settings, embedder, store)
+async def indexer(pool, settings, embedder, store, sparse):
+    ix = Indexer(pool, settings, embedder, store, sparse)
     yield ix
     for task in list(ix._tasks):
         task.cancel()
@@ -304,10 +313,10 @@ async def test_an_unexpected_error_is_recorded_without_leaking_it(
 
 
 async def test_a_document_with_too_many_chunks_is_refused_before_any_embedding(
-    pool, service, settings, embedder, store
+    pool, service, settings, embedder, store, sparse
 ):
     tight = settings.model_copy(update={"embedding_max_chunks_per_document": 1})
-    ix = Indexer(pool, tight, embedder, store)
+    ix = Indexer(pool, tight, embedder, store, sparse)
 
     def build(d):
         for i in range(3):
@@ -324,10 +333,10 @@ async def test_a_document_with_too_many_chunks_is_refused_before_any_embedding(
 
 
 async def test_overlong_text_is_cut_for_embedding_and_the_cut_is_reported(
-    pool, service, settings, embedder, store
+    pool, service, settings, embedder, store, sparse
 ):
     short = settings.model_copy(update={"embedding_max_chars": 60})
-    ix = Indexer(pool, short, embedder, store)
+    ix = Indexer(pool, short, embedder, store, sparse)
     document = await parsed(service, pool, a_docx("Words " * 40))
 
     await ix.index_document(document.id)
@@ -480,6 +489,251 @@ async def test_search_results_can_feed_parent_expansion(pool, service, indexer):
     assert len(views) == 1 and "margin" in views[0].text
 
 
+# --- hybrid search ------------------------------------------------------------------------
+
+
+async def test_hybrid_finds_what_both_legs_find_and_reports_both_contributed(
+    pool, service, indexer
+):
+    document = await parsed(
+        service,
+        pool,
+        a_docx(
+            "The revolver matures in March 2027.",
+            "Employees work in three plants.",
+            "The cafeteria serves lunch daily.",
+        ),
+    )
+    await indexer.index_document(document.id)
+
+    result = await indexer.hybrid_search(
+        document.workspace_id, "when does the revolver mature"
+    )
+
+    assert result.degraded is None
+    assert result.sparse_found > 0 and result.dense_found > 0
+    assert "revolver" in result.hits[0].chunk.text
+
+
+async def test_keyword_search_finds_a_chunk_by_a_word_the_embedder_cannot_tell_apart(
+    pool, service, indexer
+):
+    paragraphs = [
+        f"Paragraph {i} describes the general facility terms." for i in range(6)
+    ]
+    paragraphs[3] = "Paragraph 3 mentions Cupertino exactly once."
+    document = await parsed(service, pool, a_docx(*paragraphs))
+    await indexer.index_document(document.id)
+
+    hits = await indexer.keyword_search(document.workspace_id, "Cupertino")
+
+    assert [h.chunk.text for h in hits[:1]] and "Cupertino" in hits[0].chunk.text
+
+
+async def test_a_rare_word_outranks_a_common_one_in_keyword_search(
+    pool, service, indexer
+):
+    document = await parsed(
+        service,
+        pool,
+        a_docx(
+            "The company reported results.",
+            "The company paid a dividend.",
+            "The company hired staff.",
+            "The company opened an office in Cupertino.",
+        ),
+    )
+    await indexer.index_document(document.id)
+
+    hits = await indexer.keyword_search(document.workspace_id, "company Cupertino")
+
+    assert "Cupertino" in hits[0].chunk.text
+
+
+async def test_a_chunk_found_by_both_legs_outranks_one_found_by_only_one(
+    pool, service, indexer
+):
+    from backend.app.retrieval.fusion import rrf
+
+    document = await parsed(
+        service, pool, a_docx("The revolver matures in 2027.", "Plants employ people.")
+    )
+    await indexer.index_document(document.id)
+    ws = document.workspace_id
+    keyword_only = await indexer.keyword_search(ws, "revolver", limit=10)
+    vector_only = await indexer.search(ws, "revolver", limit=10)
+
+    result = await indexer.hybrid_search(ws, "revolver", limit=10)
+
+    assert (
+        result.hits[0].chunk.id == vector_only[0].chunk.id == keyword_only[0].chunk.id
+    )
+    fused = rrf([[h.chunk.id for h in keyword_only], [h.chunk.id for h in vector_only]])
+    assert {h.chunk.id for h in result.hits} <= {i for i, _ in fused}
+
+
+async def test_hybrid_scores_are_rrf_scores_not_raw_scores(pool, service, indexer):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    await indexer.index_document(document.id)
+
+    result = await indexer.hybrid_search(document.workspace_id, "revolver", k=60)
+
+    # one chunk, first in both lists: 1/61 + 1/61
+    assert result.hits[0].score == pytest.approx(2 / 61)
+
+
+async def test_when_the_vector_side_fails_hybrid_returns_keyword_results_and_says_so(
+    pool, service, indexer, embedder
+):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    await indexer.index_document(document.id)
+    embedder.error = EmbeddingError("unavailable", "down")
+
+    result = await indexer.hybrid_search(document.workspace_id, "revolver")
+
+    assert result.hits and "revolver" in result.hits[0].chunk.text
+    assert result.degraded is not None and "keyword results only" in result.degraded
+    assert result.dense_found == 0 and result.sparse_found > 0
+    assert "down" not in result.degraded  # the provider's own message is not passed on
+
+
+async def test_when_the_keyword_encoder_fails_hybrid_returns_vector_results_and_says_so(
+    pool, service, indexer, sparse
+):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    await indexer.index_document(document.id)
+    sparse.error = SparseError("unavailable", "model missing")
+
+    result = await indexer.hybrid_search(document.workspace_id, "revolver")
+
+    assert result.hits and "vector results only" in (result.degraded or "")
+    assert result.sparse_found == 0 and result.dense_found > 0
+    assert "model missing" not in result.degraded
+
+
+async def test_when_the_index_itself_is_unreachable_postgres_full_text_answers(
+    pool, service, indexer, store, monkeypatch
+):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    await indexer.index_document(document.id)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("qdrant is down")
+
+    monkeypatch.setattr(store, "search_dense", boom)
+    monkeypatch.setattr(store, "search_sparse", boom)
+
+    result = await indexer.hybrid_search(document.workspace_id, "revolver")
+
+    assert result.hits and "revolver" in result.hits[0].chunk.text
+    assert (
+        result.degraded == "vector index unavailable: database full-text results only"
+    )
+    assert "qdrant is down" not in result.degraded
+
+
+async def test_a_question_with_no_keywords_still_gets_vector_results(
+    pool, service, indexer
+):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    await indexer.index_document(document.id)
+
+    result = await indexer.hybrid_search(document.workspace_id, "what is the")
+
+    assert result.sparse_found == 0 and result.dense_found > 0 and result.hits
+
+
+async def test_hybrid_stays_inside_the_workspace(pool, service, indexer):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    await indexer.index_document(document.id)
+    other = await repo.create_workspace(pool, "Elsewhere")
+
+    result = await indexer.hybrid_search(other.id, "revolver")
+
+    assert result.hits == [] and result.degraded is None
+    assert await indexer.keyword_search(other.id, "revolver") == []
+
+
+async def test_hybrid_can_be_limited_to_an_entity(pool, service, indexer):
+    workspace = await repo.default_workspace_id(pool)
+    acme = await repo.create_entity(pool, workspace, "Acme")
+    beta = await repo.create_entity(pool, workspace, "Beta")
+    first = await parsed(
+        service, pool, a_docx("Revolver one."), name="a.docx", entity_id=acme.id
+    )
+    second = await parsed(
+        service, pool, a_docx("Revolver two."), name="b.docx", entity_id=beta.id
+    )
+    await indexer.index_document(first.id)
+    await indexer.index_document(second.id)
+
+    result = await indexer.hybrid_search(workspace, "revolver", entity_ids=[acme.id])
+    keyword = await indexer.keyword_search(workspace, "revolver", entity_ids=[acme.id])
+
+    assert {h.chunk.document_id for h in result.hits} == {first.id}
+    assert {h.chunk.document_id for h in keyword} == {first.id}
+
+
+async def test_the_limit_is_respected(pool, service, indexer):
+    document = await parsed(
+        service,
+        pool,
+        a_docx(
+            *[f"Paragraph {i} about the revolver facility terms." for i in range(8)]
+        ),
+    )
+    await indexer.index_document(document.id)
+
+    result = await indexer.hybrid_search(document.workspace_id, "revolver", limit=1)
+
+    assert len(result.hits) <= 1
+
+
+async def test_hybrid_results_can_feed_parent_expansion(pool, service, indexer):
+    from backend.app.chunking.expand import expand_to_parents
+
+    document = await parsed(
+        service,
+        pool,
+        a_docx(
+            "The revolver matures in March 2027.", "The revolver margin is 2 percent."
+        ),
+    )
+    await indexer.index_document(document.id)
+
+    result = await indexer.hybrid_search(document.workspace_id, "revolver")
+    views = await expand_to_parents(pool, result.hits, max_parents=5)
+
+    assert len(views) == 1 and "margin" in views[0].text
+
+
+async def test_if_the_keyword_encoder_cannot_run_indexing_fails_with_a_plain_reason(
+    pool, service, indexer, sparse
+):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    sparse.error = SparseError("unavailable", "model missing")
+
+    outcome = await indexer.index_document(document.id)
+
+    after = await repo.get_document(pool, document.id)
+    assert outcome == "failed" and after.index_status == "failed"
+    assert after.index_detail == "the keyword encoder could not run; retry later"
+    assert "model missing" not in after.index_detail
+
+
+async def test_a_retry_after_the_encoder_comes_back_indexes_the_document(
+    pool, service, indexer, sparse
+):
+    document = await parsed(service, pool, a_docx("The revolver matures in 2027."))
+    sparse.error = SparseError("unavailable", "x")
+    await indexer.index_document(document.id)
+    sparse.error = None
+    assert await repo.mark_pending_index(pool, document.id)
+
+    assert await indexer.index_document(document.id) == "indexed"
+    assert await indexer.keyword_search(document.workspace_id, "revolver")
+
+
 # --- HTTP ---------------------------------------------------------------------------------
 
 
@@ -565,6 +819,34 @@ async def test_the_search_route_validates_its_input(client):
     assert (
         await client.get(f"/workspaces/{unknown}/search", params={"q": "x"})
     ).status_code == 404
+
+
+async def test_the_search_route_defaults_to_hybrid(client):
+    body = await upload_over_http(client, a_docx("The revolver matures in March 2027."))
+    await wait_http_indexed(client, body["id"])
+
+    response = await client.get(
+        f"/workspaces/{body['workspace_id']}/search", params={"q": "revolver"}
+    )
+
+    assert response.status_code == 200
+    [hit] = response.json()
+    assert "revolver" in hit["text"]
+    assert "x-retrieval-degraded" not in response.headers
+
+
+async def test_hybrid_over_http_reports_a_degraded_search_in_a_header(client, embedder):
+    body = await upload_over_http(client, a_docx("The revolver matures in 2027."))
+    await wait_http_indexed(client, body["id"])
+    embedder.error = EmbeddingError("unavailable", "down")
+
+    response = await client.get(
+        f"/workspaces/{body['workspace_id']}/search",
+        params={"q": "revolver", "mode": "hybrid"},
+    )
+
+    assert response.status_code == 200 and response.json()
+    assert "keyword results only" in response.headers["x-retrieval-degraded"]
 
 
 async def test_vector_search_reports_503_when_embedding_is_down(client, embedder):

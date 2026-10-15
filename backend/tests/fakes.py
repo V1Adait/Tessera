@@ -15,6 +15,7 @@ from pydantic import Field
 
 from backend.app.config import Settings
 from backend.app.models import ChatRequest, Message
+from backend.app.retrieval.sparse import SparseVec
 
 
 class ScriptedFake(BaseChatModel):
@@ -212,3 +213,59 @@ class HashEmbedder:
         if self.error is not None:
             raise self.error
         return [self.vector(t) for t in texts]
+
+
+async def drop_test_collections(client, prefix: str, attempts: int = 5) -> None:
+    """Remove the throwaway collections a test made on a real Qdrant server.
+
+    On Windows the server cannot rename a collection's folder while a background task still has a
+    file in it open, and the delete fails with 'failed to rename file'. That is clean-up noise,
+    not a test failure: retry briefly, and if it still will not go, leave it (a later run removes
+    anything starting with the test prefix)."""
+    for collection in (await client.get_collections()).collections:
+        if not collection.name.startswith(prefix):
+            continue
+        for attempt in range(attempts):
+            try:
+                await client.delete_collection(collection.name)
+                break
+            except Exception:  # noqa: BLE001  # clean-up must never fail a test
+                if attempt == attempts - 1:
+                    break
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+
+class FakeSparse:
+    """A keyword encoder that needs no model or network. Each word becomes a term (its hash) with
+    its count as the weight; a query's terms all weigh 1. Qdrant applies the rarity weighting
+    (IDF) itself, so ranking behaves like BM25. Can be told to fail."""
+
+    name = "fake/bm25"
+    STOPWORDS = frozenset(
+        ["the", "a", "an", "of", "in", "is", "are", "to", "and", "what", "when", "does"]
+    )
+
+    def __init__(self) -> None:
+        self.error: Exception | None = None
+        self.document_calls = 0
+
+    def vector(self, text: str, query: bool = False) -> SparseVec:
+        from collections import Counter
+
+        words = [
+            w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in self.STOPWORDS
+        ]
+        counts = Counter(zlib.crc32(w.encode()) for w in words)
+        indices = sorted(counts)
+        return SparseVec(indices, [1.0 if query else float(counts[i]) for i in indices])
+
+    async def encode_documents(self, texts: list[str]) -> list[SparseVec]:
+        self.document_calls += 1
+        if self.error is not None:
+            raise self.error
+        return [self.vector(t) for t in texts]
+
+    async def encode_query(self, text: str) -> SparseVec:
+        if self.error is not None:
+            raise self.error
+        return self.vector(text, query=True)
