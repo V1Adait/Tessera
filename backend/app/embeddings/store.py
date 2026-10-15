@@ -10,12 +10,14 @@ sizes of one model) can never be mixed in one index; changing the model starts a
 A point's id is the chunk's id.
 """
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
 from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient, models
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ class QdrantStore:
         self._prefix = prefix
         self._model = model
         self._ready: set[str] = set()
+        self._create_lock = asyncio.Lock()
 
     def _name(self, dimension: int) -> str:
         return collection_name(self._prefix, self._model, dimension)
@@ -87,28 +90,39 @@ class QdrantStore:
         return int(names[0].rsplit("__", 1)[1])
 
     async def _ensure(self, dimension: int) -> str:
+        """Make sure the collection exists. Two documents indexed at the same moment both reach
+        this point: the lock makes the second wait and find it already created, and a 409
+        ("already exists") from another process is treated as success."""
         name = self._name(dimension)
         if name in self._ready:
             return name
-        if not await self._client.collection_exists(name):
-            await self._client.create_collection(
-                name,
-                vectors_config=models.VectorParams(
-                    size=dimension, distance=models.Distance.COSINE
-                ),
-            )
-            for field in (
-                ("workspace_id", "entity_id", "document_id")
-                if self._payload_indexes
-                else ()
-            ):
-                try:  # server mode indexes the filter fields; embedded mode has nothing to index
-                    await self._client.create_payload_index(
-                        name, field, models.PayloadSchemaType.KEYWORD
+        async with self._create_lock:
+            if name in self._ready:
+                return name
+            if not await self._client.collection_exists(name):
+                try:
+                    await self._client.create_collection(
+                        name,
+                        vectors_config=models.VectorParams(
+                            size=dimension, distance=models.Distance.COSINE
+                        ),
                     )
-                except Exception:  # noqa: BLE001  # filters still work without the index
-                    logger.info("no payload index for %s on %s", field, name)
-        self._ready.add(name)
+                except UnexpectedResponse as exc:
+                    if exc.status_code != 409:
+                        raise
+                    logger.info("collection %s was created by someone else", name)
+                for field in (
+                    ("workspace_id", "entity_id", "document_id")
+                    if self._payload_indexes
+                    else ()
+                ):
+                    try:  # a real server indexes the filter fields; embedded mode has none
+                        await self._client.create_payload_index(
+                            name, field, models.PayloadSchemaType.KEYWORD
+                        )
+                    except Exception:  # noqa: BLE001  # filters still work without the index
+                        logger.info("no payload index for %s on %s", field, name)
+            self._ready.add(name)
         return name
 
     async def upsert(self, points: list[VectorPoint], *, batch_size: int = 256) -> None:

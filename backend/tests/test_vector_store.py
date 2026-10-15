@@ -1,7 +1,13 @@
-"""The Qdrant store in embedded (in-memory) mode: scope filters, reuse data, deletes."""
+"""The Qdrant store: scope filters, reuse data, deletes. Every test runs twice: against the
+embedded in-memory mode, and against a real Qdrant server when one is reachable at
+TEST_QDRANT_URL (default http://127.0.0.1:6333). The server run skips itself if there is none.
+Each server test uses its own collection prefix and removes it afterwards."""
 
+import asyncio
+import os
 from uuid import uuid4
 
+import httpx
 import pytest
 from qdrant_client import AsyncQdrantClient
 
@@ -9,13 +15,33 @@ from backend.app.embeddings.store import QdrantStore, VectorPoint, collection_na
 
 WS_A, WS_B = uuid4(), uuid4()
 ACME, BETA = uuid4(), uuid4()
+SERVER_URL = os.environ.get("TEST_QDRANT_URL", "http://127.0.0.1:6333")
 
 
-@pytest.fixture
-async def store():
-    client = AsyncQdrantClient(location=":memory:")
-    s = QdrantStore(client, prefix="t", model="fake/model")
+def _server_up() -> bool:
+    try:
+        return httpx.get(f"{SERVER_URL}/healthz", timeout=1).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+@pytest.fixture(params=["memory", "server"])
+async def store(request):
+    if request.param == "memory":
+        client = AsyncQdrantClient(location=":memory:")
+        s = QdrantStore(client, prefix="t", model="fake/model")
+        yield s
+        await s.close()
+        return
+    if not _server_up():
+        pytest.skip(f"no Qdrant server at {SERVER_URL}")
+    prefix = f"test_{uuid4().hex[:10]}"
+    client = AsyncQdrantClient(url=SERVER_URL)
+    s = QdrantStore(client, prefix=prefix, model="fake/model", payload_indexes=True)
     yield s
+    for c in (await client.get_collections()).collections:
+        if c.name.startswith(prefix):
+            await client.delete_collection(c.name)
     await s.close()
 
 
@@ -121,3 +147,26 @@ async def test_deleting_from_a_missing_collection_is_not_an_error(store):
     await store.delete(2, [uuid4()])
 
     assert await store.document_points(2, uuid4()) == []
+
+
+async def test_two_documents_written_at_the_same_moment_into_an_empty_store(store):
+    """Both reach 'create the collection' together. This failed on a real server before the
+    creation was serialised: the second writer got 'already exists'."""
+    first, second = point([1.0, 0.0]), point([0.0, 1.0])
+
+    await asyncio.gather(store.upsert([first]), store.upsert([second]))
+
+    hits = await find(store, [1.0, 1.0], limit=5)
+    assert {h.chunk_id for h in hits} == {first.chunk_id, second.chunk_id}
+
+
+async def test_a_collection_someone_else_created_is_not_an_error(store):
+    """A second process (or an earlier run) already made the collection."""
+    await store.upsert([point([1.0, 0.0])])
+    fresh = QdrantStore(
+        store._client, prefix=store._prefix, model=store._model
+    )  # knows nothing yet
+
+    await fresh.upsert([point([0.0, 1.0])])
+
+    assert len(await find(fresh, [1.0, 1.0], limit=5)) == 2

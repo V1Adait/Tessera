@@ -1,11 +1,13 @@
-"""Indexing chunks into the vector store, against a real database and an in-memory Qdrant.
+"""Indexing chunks into the vector store, against a real database and Qdrant (in memory, and a real server when one is up).
 
 Each test gets a throwaway schema (conftest) and skips without a database. The embedder is a fake
 (HashEmbedder: shared words give nearby vectors), so nothing touches the network.
 """
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -26,6 +28,14 @@ from backend.tests.fakes import HashEmbedder, make_settings
 from backend.tests.test_chunks_db import reader, wait_final
 
 FINAL = {"parsed", "needs_review", "needs_ocr", "failed"}
+SERVER_URL = os.environ.get("TEST_QDRANT_URL", "http://127.0.0.1:6333")
+
+
+def server_up() -> bool:
+    try:
+        return httpx.get(f"{SERVER_URL}/healthz", timeout=1).status_code == 200
+    except httpx.HTTPError:
+        return False
 
 
 @pytest.fixture
@@ -38,12 +48,28 @@ def embedder():
     return HashEmbedder()
 
 
-@pytest.fixture
-async def store():
+@pytest.fixture(params=["memory", "server"])
+async def store(request):
+    """Every indexer test runs on embedded Qdrant and, when one is reachable, on a real server
+    (TEST_QDRANT_URL, default http://127.0.0.1:6333) in its own throwaway collections."""
+    if request.param == "memory":
+        s = QdrantStore(
+            AsyncQdrantClient(location=":memory:"), prefix="t", model="fake/hash-embed"
+        )
+        yield s
+        await s.close()
+        return
+    if not server_up():
+        pytest.skip(f"no Qdrant server at {SERVER_URL}")
+    prefix = f"test_{uuid4().hex[:10]}"
+    client = AsyncQdrantClient(url=SERVER_URL)
     s = QdrantStore(
-        AsyncQdrantClient(location=":memory:"), prefix="t", model="fake/hash-embed"
+        client, prefix=prefix, model="fake/hash-embed", payload_indexes=True
     )
     yield s
+    for c in (await client.get_collections()).collections:
+        if c.name.startswith(prefix):
+            await client.delete_collection(c.name)
     await s.close()
 
 
