@@ -236,9 +236,10 @@ class QdrantStore:
 
 
 def make_qdrant_client(
-    *, url: str | None, api_key: str | None, path: str
+    *, url: str | None, api_key: str | None, path: str, timeout_s: float = 30.0
 ) -> AsyncQdrantClient:
-    """A server if a URL is configured, otherwise embedded storage in a local folder."""
+    """A server if a URL is configured, otherwise embedded storage in a local folder. The client's
+    own default timeout is 5 seconds, too short for a big batch on a busy server."""
     if url:
-        return AsyncQdrantClient(url=url, api_key=api_key)
+        return AsyncQdrantClient(url=url, api_key=api_key, timeout=int(timeout_s))
     return AsyncQdrantClient(path=path)

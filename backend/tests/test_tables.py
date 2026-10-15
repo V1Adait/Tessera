@@ -244,3 +244,104 @@ def test_a_figure_keeps_its_real_labels_and_says_the_data_was_not_read():
     assert block.type == "figure" and block.labels == ["Fiscal year", "USD billions"]
     assert block.text == "Figure 3: Revenue\nFiscal year\nUSD billions"
     assert block.flags == ["chart_data_not_extracted"] and block.location.page == 2
+
+
+# --- totals that the first version of the check judged wrongly (found on a real 10-K) --------
+
+
+def test_a_percentage_column_is_never_judged():
+    rows = [
+        ["", "2025", "Change"],
+        ["Americas", "$178", "7%"],
+        ["Europe", "$111", "10%"],
+        [
+            "Total net sales",
+            "$289",
+            "8%",
+        ],  # 7% + 10% is not 8%: percentages are not summed
+    ]
+
+    assert total_mismatches(rows, header_rows=1) == []
+
+
+def test_a_wrong_dollar_total_is_still_caught_next_to_a_percentage_column():
+    rows = [
+        ["", "2025", "Change"],
+        ["Americas", "$178", "7%"],
+        ["Europe", "$111", "10%"],
+        ["Total net sales", "$300", "8%"],
+    ]
+
+    assert total_mismatches(rows, header_rows=1) == [(3, 1)]
+
+
+def test_a_ratio_row_between_two_figures_is_stepped_over():
+    rows = [
+        ["", "2025"],
+        ["Research and development", "$34,550"],
+        ["Percentage of total net sales", "8%"],
+        ["Selling, general and administrative", "$27,601"],
+        ["Percentage of total net sales", "7%"],
+        ["Total operating expenses", "$62,151"],
+    ]
+
+    assert total_mismatches(rows, header_rows=1) == []
+
+
+def test_a_label_row_with_no_figure_does_not_cut_the_run():
+    rows = [
+        ["", "2025"],
+        ["Fixed-rate notes", "$86,781"],
+        ["2025 debt issuance:", ""],
+        ["Fixed-rate notes", "4,500"],
+        ["Total term debt principal", "91,281"],
+    ]
+
+    assert total_mismatches(rows, header_rows=1) == []
+
+
+def test_a_dash_means_nothing_printed_and_does_not_cut_the_run():
+    rows = [["", "2025"], ["a", "10"], ["b", "—"], ["c", "5"], ["Total", "15"]]
+
+    assert total_mismatches(rows, header_rows=1) == []
+
+
+def test_a_text_cell_still_cuts_the_run():
+    rows = [
+        ["", "2025"],
+        ["a", "10"],
+        ["Note", "see below"],
+        ["b", "5"],
+        ["Total", "15"],
+    ]
+
+    assert total_mismatches(rows, header_rows=1) == [(4, 1)]
+
+
+def test_a_grand_total_may_be_the_sum_of_the_subtotals_above_it():
+    rows = [
+        ["", "2025"],
+        ["Cash", "35,934"],
+        ["Receivables", "39,777"],
+        ["Total current assets", "75,711"],
+        ["Non-current assets:", ""],
+        ["Securities", "77,723"],
+        ["Equipment", "49,834"],
+        ["Total non-current assets", "127,557"],
+        ["Total assets", "203,268"],  # 75,711 + 127,557
+    ]
+
+    assert total_mismatches(rows, header_rows=1) == []
+
+
+def test_a_grand_total_that_matches_nothing_is_flagged():
+    rows = [
+        ["", "2025"],
+        ["Cash", "35,934"],
+        ["Total current assets", "35,934"],
+        ["Securities", "77,723"],
+        ["Total non-current assets", "77,723"],
+        ["Total assets", "999,999"],
+    ]
+
+    assert total_mismatches(rows, header_rows=1) == [(5, 1)]

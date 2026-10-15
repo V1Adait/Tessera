@@ -1,0 +1,25 @@
+{"id":"t01","question":"What were Apple's total net sales in fiscal 2025?","gold":["$416,161"],"kind":"table","why":"segment table, total row"}
+{"id":"t02","question":"How much did iPhone contribute to net sales in 2025?","gold":["$209,586"],"kind":"table","why":"net sales by category"}
+{"id":"t03","question":"What were net sales in Greater China in 2025?","gold":["$64,377"],"kind":"table","why":"segment table, one row"}
+{"id":"t04","question":"What was operating income for the year?","gold":["Operating income | 133,050"],"kind":"table","why":"income statement"}
+{"id":"t05","question":"What was diluted earnings per share in 2025?","gold":["$7.46 |  | $6.08 |  | $6.13"],"kind":"table","why":"income statement, EPS rows"}
+{"id":"t06","question":"How much was spent on research and development in fiscal 2025?","gold":["34,550"],"kind":"table","why":"R&D appears in MD&A and income statement"}
+{"id":"t07","question":"What were total assets at the end of the fiscal year?","gold":["$359,241"],"kind":"table","why":"balance sheet"}
+{"id":"t08","question":"How much cash and cash equivalents did the company hold at year end?","gold":["$35,934"],"kind":"table","why":"balance sheet, first line"}
+{"id":"t09","question":"What was the effective tax rate in 2025 compared with 2024?","gold":["15.6% |  | 24.1%"],"kind":"table","why":"tax table"}
+{"id":"t10","question":"What was the gross margin percentage for Services?","gold":["Services | 75.4% | 73.9% | 70.8%"],"kind":"table","why":"gross margin table"}
+{"id":"t11","question":"How much long-term debt does the company have outside of the current portion?","gold":["Term debt | 78,328"],"kind":"table","why":"paraphrase: non-current term debt"}
+{"id":"p01","question":"How much commercial paper was outstanding at year end?","gold":["$8.0 billion of commercial paper outstanding"],"kind":"prose","why":"liquidity section"}
+{"id":"p02","question":"How many shares did the company buy back during 2025 and what did it cost?","gold":["repurchased 402 million shares of its common stock for $89.3 billion"],"kind":"prose","why":"paraphrase: buy back = repurchase"}
+{"id":"p03","question":"How did the quarterly dividend change during the year?","gold":["quarterly dividend from $0.25 to $0.26 per share"],"kind":"prose","why":"capital return"}
+{"id":"p04","question":"How many people work at the company?","gold":["approximately 166,000 full-time equivalent employees"],"kind":"prose","why":"paraphrase: people = employees"}
+{"id":"p05","question":"Where is the company based?","gold":["headquarters is located in Cupertino, California"],"kind":"prose","why":"paraphrase: based = headquarters"}
+{"id":"p06","question":"Which firm audits the financial statements?","gold":["Ernst & Young LLP"],"kind":"prose","why":"paraphrase: firm audits"}
+{"id":"p07","question":"How many shares of common stock were outstanding on the cover date?","gold":["14,776,353,000 shares of common stock were issued and outstanding as of October 17, 2025"],"kind":"prose","why":"cover page"}
+{"id":"r01","question":"In which countries is the company's manufacturing performed?","gold":["outsourcing partners located primarily in China mainland, India, Japan, South Korea, Taiwan and Vietnam"],"kind":"risk","why":"supply chain risk factor"}
+{"id":"r02","question":"Does the company depend on single suppliers for components?","gold":["relies on single-source partners in the U.S., Asia and Europe"],"kind":"risk","why":"supply concentration"}
+{"id":"r03","question":"How could tariffs affect the business?","gold":["Restrictions on international trade, such as tariffs"],"kind":"risk","why":"trade risk factor"}
+{"id":"r04","question":"What is the lawsuit filed by Epic Games about?","gold":["Epic Games, Inc. filed a lawsuit in the U.S. District Court for the Northern District of California"],"kind":"risk","why":"legal proceedings"}
+{"id":"r05","question":"What remedies did the Department of Justice propose against Google?","gold":["remedies initially proposed by the DOJ"],"kind":"risk","why":"risk factor on search distribution"}
+{"id":"r06","question":"When during the year is demand strongest?","gold":["seasonal holiday demand"],"kind":"prose","why":"paraphrase: demand strongest = seasonality"}
+{"id":"r07","question":"Are the company's facilities exposed to natural disasters?","gold":["prone to earthquakes and other natural disasters"],"kind":"risk","why":"operations risk"}

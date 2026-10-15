@@ -355,9 +355,24 @@ def test_clean_filing_table_rejoins_symbols():
     assert clean_filing_table(
         [["Rev", "$", "100", "", "$", "90"], ["Loss", "(5", ")", "(4", ")%"]]
     ) == [
-        ["Rev", "", "$100", "", "", "$90"],
+        ["Rev", "$100", "", "", "$90", ""],  # the figure takes the column of its sign
         ["Loss", "(5)", "", "(4)%", ""],
     ]
+
+
+def test_rows_with_and_without_a_dollar_sign_keep_their_figures_in_one_column():
+    """SEC tables print the sign only on the first and total rows. The figures of one column
+    must still line up, or sums down the column compare different columns."""
+    cleaned = clean_filing_table(
+        [
+            ["Americas", "$", "178,353", "", "7", "%"],
+            ["Europe", "111,032", "", "", "10", "%"],
+            ["Total", "$", "289,385", "", "8", "%"],
+        ]
+    )
+
+    assert [row[1] for row in cleaned] == ["$178,353", "111,032", "$289,385"]
+    assert [row[4] for row in cleaned] == ["7%", "10%", "8%"]
 
 
 # --- offsets hold for every parser ------------------------------------------------------

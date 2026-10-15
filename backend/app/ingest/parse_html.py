@@ -54,6 +54,19 @@ _MAX_SPAN = 100
 _MAX_CELLS = 200_000
 _WS = re.compile(r"\s+")
 
+# A heading written as styled text instead of an <h1>-<h6> tag (every SEC filing does this):
+# a short line that is bold from end to end, or one that opens with "PART II" / "Item 1A.".
+_BOLD_STYLE = re.compile(r"font-weight\s*:\s*(?:bold|bolder|[6-9]00)\b", re.IGNORECASE)
+_BOLD_TAGS = {"b", "strong", "th"}
+# "PART II" / "Item 1A. Risk Factors": the keyword, the number, then nothing or a title that starts
+# with a capital. "Item 1A of this report discusses..." is a sentence, not a heading.
+_PART = re.compile(r"^(?i:part)\s+[IVX]+(?:[.:]?\s*$|[.:]\s*[A-Z\[(]|\s+[A-Z\[(])")
+_ITEM = re.compile(
+    r"^(?i:item)\s+\d+[A-Ca-c]?(?:[.:]?\s*$|[.:]\s*[A-Z\[(0-9]|\s+[A-Z\[(])"
+)
+_MAX_HEADING_WORDS = 15
+_MAX_HEADING_CHARS = 120
+
 
 def _is_hidden(tag: Tag) -> bool:
     if tag.name in _HIDDEN_TAGS or tag.has_attr("hidden"):
@@ -86,6 +99,61 @@ def _text_of(tag: Tag, hidden: list[int] | None = None) -> str:
     out: list[str] = []
     _collect(tag, out, hidden if hidden is not None else [0])
     return _WS.sub(" ", "".join(out)).strip()
+
+
+def _is_bold(tag: Tag) -> bool:
+    if tag.name.lower() in _BOLD_TAGS:
+        return True
+    style = tag.get("style")
+    return isinstance(style, str) and bool(_BOLD_STYLE.search(style))
+
+
+def _all_bold(block: Tag) -> bool:
+    """True if every piece of visible text in `block` sits inside something bold."""
+    seen = False
+    for node in block.descendants:
+        if not isinstance(node, NavigableString) or isinstance(
+            node, (Comment, Doctype, CData, ProcessingInstruction, Declaration)
+        ):
+            continue
+        if not str(node).strip():
+            continue
+        seen = True
+        parent = node.parent
+        while isinstance(parent, Tag):
+            if _is_bold(parent):
+                break
+            if parent is block:
+                return False
+            parent = parent.parent
+        else:
+            return False
+    return seen
+
+
+def heading_level(block: Tag, text: str) -> int | None:
+    """The heading level of a styled block of text, or None if it reads as an ordinary paragraph.
+
+    PART I / PART II is level 1 and 'Item 1A.' level 2, whatever the styling; any other short
+    line that is bold from end to end is level 3. Bold sentences (they end in punctuation),
+    long bold passages, bare numbers (page numbers) and lowercase fragments stay paragraphs."""
+    if not text or len(text) > _MAX_HEADING_CHARS:
+        return None
+    if len(text.split()) > _MAX_HEADING_WORDS:
+        return None
+    if text.endswith(".") and len(text.split()) > 6:
+        return None  # a sentence, whatever it starts with
+    if _PART.match(text):
+        return 1
+    if _ITEM.match(text):
+        return 2
+    if not _all_bold(block):
+        return None
+    if text.endswith((".", ",", ";", ":")) or not any(ch.isalpha() for ch in text):
+        return None
+    if text[0].islower():
+        return None
+    return 3
 
 
 def _span(cell: Tag, attribute: str) -> int:
@@ -153,8 +221,10 @@ def clean_filing_table(rows: list[list[str]]) -> list[list[str]]:
                 while j < len(cells) and not cells[j]:
                     j += 1
                 if j < len(cells):
-                    cells[j] = cell + cells[j]
-                    cells[i] = ""
+                    # The merged figure goes in the column of the sign, because that is where
+                    # rows WITHOUT a sign keep their figure; this keeps the whole column aligned.
+                    cells[i] = cell + cells[j]
+                    cells[j] = ""
         out.append(cells)
     return out
 
@@ -232,7 +302,11 @@ class _Walker:
                 else:
                     text = _text_of(child, self.hidden)
                     if text:
-                        self.builder.paragraph(text, index=self.next_index())
+                        level = heading_level(child, text)
+                        if level is None:
+                            self.builder.paragraph(text, index=self.next_index())
+                        else:
+                            self.builder.heading(text, level, index=self.next_index())
             else:
                 # inline element (span, a, b ...) or an unknown tag: its text joins the paragraph,
                 # unless it wraps blocks (inline XBRL tags often do), in which case walk into it

@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     qdrant_url: str | None = None
     qdrant_api_key: str | None = None  # from the environment, never committed
     qdrant_path: str = "data/qdrant"
+    qdrant_timeout_s: float = (
+        30.0  # the client default (5 s) is too short for big batches
+    )
     qdrant_collection_prefix: str = "chunks"
 
     # Query handling: classify the question, then plan it. See backend/app/query/.

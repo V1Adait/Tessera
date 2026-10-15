@@ -101,39 +101,96 @@ def _decimals(cell: str) -> int:
     return len(core.split(".")[1]) if "." in core else 0
 
 
+def _is_ratio(cell: str) -> bool:
+    """A percentage ('6%', '(4)%') or a multiple ('3.5x'): figures that cannot be added up."""
+    text = cell.strip()
+    return text.endswith(("%", "x")) and any(ch.isdigit() for ch in text)
+
+
+def _within(total: float, running: float, terms: int, places: int) -> bool:
+    """Rounding: every printed figure may be off by half a unit of its last digit, so k terms can
+    legitimately differ from a printed total by up to k/2 units. Anything beyond that is a real
+    discrepancy (a misread digit or a lost row)."""
+    unit = 10.0**-places
+    return abs(running - total) <= max(unit, 0.5 * terms * unit) + 1e-9
+
+
+def _is_blank(cell: str) -> bool:
+    """Nothing printed here (empty, or a dash meaning nil): not a term, and not a barrier."""
+    text = cell.strip()
+    return not text or text in _DASHES
+
+
+def _sums_to_run(
+    rows: list[list[str]], r: int, c: int, header_rows: int, total: float
+) -> bool:
+    """Does some run of rows directly above row r add up to `total` in column c? Ratio rows
+    (a "percentage of net sales" line between two figures) and blank cells are stepped over;
+    a text cell stops the run."""
+    running = 0.0
+    terms = 0
+    places = _decimals(rows[r][c])
+    for j in range(r - 1, header_rows - 1, -1):
+        cell = rows[j][c] if c < len(rows[j]) else ""
+        if _is_ratio(cell) or _is_blank(cell):
+            continue
+        value = parse_number(cell)
+        if value is None:
+            return False
+        running += value
+        terms += 1
+        places = max(places, _decimals(cell))
+        if _within(total, running, terms, places):
+            return True
+    return False
+
+
+def _sums_to_subtotals(
+    rows: list[list[str]], r: int, c: int, header_rows: int, total: float
+) -> bool:
+    """A grand total is often the sum of the SUBTOTALS above it (Total assets = Total current
+    assets + Total non-current assets), which are not a contiguous run of rows. Try the last two
+    to four rows labelled Total/Subtotal."""
+    figures: list[tuple[float, str]] = []
+    for j in range(r - 1, header_rows - 1, -1):
+        if rows[j] and _TOTAL_LABEL.match(rows[j][0]) and c < len(rows[j]):
+            value = parse_number(rows[j][c])
+            if value is not None and not _is_ratio(rows[j][c]):
+                figures.append((value, rows[j][c]))
+    for k in range(2, min(4, len(figures)) + 1):
+        chosen = figures[:k]
+        places = max([_decimals(rows[r][c])] + [_decimals(text) for _, text in chosen])
+        if _within(total, sum(v for v, _ in chosen), k, places):
+            return True
+    return False
+
+
 def total_mismatches(
     rows: list[list[str]], header_rows: int = 0
 ) -> list[tuple[int, int]]:
-    """Find 'Total ...' rows whose figures are not the sum of the rows directly above them.
+    """Find 'Total ...' rows whose figures are not explained by the rows above them.
 
-    A total may add up any run of rows immediately above it (a statement often has a subtotal
-    in between), so it is accepted if SOME such run sums to it. Returns [(row, column)] of every
-    total cell that matched none: those cells are suspect (a misread digit, a lost row)."""
+    A total is accepted if SOME run of rows directly above it adds up to it (a statement often
+    has a subtotal in between), or if it is the sum of the subtotals above it. Percentage and
+    multiple columns ('6%', '3.5x') are never judged: they are not sums. Returns [(row, column)]
+    of every total cell that matched none: those cells are suspect (a misread digit, a lost row).
+    Some totals cannot be checked this way (a net of two groups, a running balance); they may
+    show up here, which is why this only lowers confidence and never rejects a table."""
     problems: list[tuple[int, int]] = []
     for r in range(max(header_rows, 1), len(rows)):
         if not rows[r] or not _TOTAL_LABEL.match(rows[r][0]):
             continue
         for c in range(1, len(rows[r])):
+            if _is_ratio(rows[r][c]):
+                continue
             total = parse_number(rows[r][c])
             if total is None:
                 continue
-            running = 0.0
-            matched = False
-            places = _decimals(rows[r][c])
-            for j in range(r - 1, header_rows - 1, -1):
-                value = parse_number(rows[j][c]) if c < len(rows[j]) else None
-                if value is None:
-                    break
-                running += value
-                places = max(places, _decimals(rows[j][c]))
-                # Rounding: every printed figure may be off by half a unit of its last digit, so
-                # k terms can legitimately differ from a printed total by up to k/2 units. Anything
-                # beyond that is a real discrepancy (a misread digit or a lost row).
-                terms = r - j
-                unit = 10.0**-places
-                if abs(running - total) <= max(unit, 0.5 * terms * unit) + 1e-9:
-                    matched = True
-                    break
-            if not matched and r - 1 >= header_rows:
-                problems.append((r, c))
+            if r - 1 < header_rows:
+                continue
+            if _sums_to_run(rows, r, c, header_rows, total):
+                continue
+            if _sums_to_subtotals(rows, r, c, header_rows, total):
+                continue
+            problems.append((r, c))
     return problems

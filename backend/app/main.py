@@ -48,6 +48,7 @@ def build_indexer(pool: asyncpg.Pool, settings: Settings) -> Indexer | None:
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             path=settings.qdrant_path,
+            timeout_s=settings.qdrant_timeout_s,
         ),
         prefix=settings.qdrant_collection_prefix,
         model=settings.embedding_model,

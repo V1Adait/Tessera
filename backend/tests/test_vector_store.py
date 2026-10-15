@@ -36,7 +36,7 @@ async def store(request):
     if not _server_up():
         pytest.skip(f"no Qdrant server at {SERVER_URL}")
     prefix = f"test_{uuid4().hex[:10]}"
-    client = AsyncQdrantClient(url=SERVER_URL)
+    client = AsyncQdrantClient(url=SERVER_URL, timeout=60)
     s = QdrantStore(client, prefix=prefix, model="fake/model", payload_indexes=True)
     yield s
     for c in (await client.get_collections()).collections:
