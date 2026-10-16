@@ -6,6 +6,8 @@ stores the result with its evidence in one transaction.
 """
 
 import logging
+from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 import asyncpg
@@ -16,12 +18,29 @@ from backend.app.db import repository as repo
 from backend.app.db.records import ChunkHit
 from backend.app.embeddings.indexer import Indexer
 from backend.app.llm import get_llm
+from backend.app.llm_cache import PgLlmCache
 from backend.app.matrix.extractor import CellExtractor, Retriever
-from backend.app.matrix.models import CellRecord, ColumnDraft, ColumnPatch, ColumnRecord
+from backend.app.matrix.models import (
+    CellOutcome,
+    CellRecord,
+    ColumnDraft,
+    ColumnPatch,
+    ColumnRecord,
+)
 from backend.app.retrieval.terms import or_query
 from backend.app.tracing import Recorder, db_recorder
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Filled:
+    """A cell that was just filled, and what filling it cost."""
+
+    cell: CellRecord
+    cost_usd: Decimal
+    unknown_cost_calls: int
+    model_calls: int
 
 
 class EntityNotFoundError(LookupError):
@@ -69,9 +88,30 @@ class MatrixService:
         column_id: UUID,
         *,
         replace_pinned: bool = False,
+        refresh: bool = False,
     ) -> CellRecord:
         """Fill (or refill) one cell. Raises ColumnNotFoundError, EntityNotFoundError or
         CellPinnedError; a model or retrieval problem does not raise, it becomes the cell's status."""
+        return (
+            await self.fill_cell(
+                workspace_id,
+                entity_id,
+                column_id,
+                replace_pinned=replace_pinned,
+                refresh=refresh,
+            )
+        ).cell
+
+    async def fill_cell(
+        self,
+        workspace_id: UUID,
+        entity_id: UUID,
+        column_id: UUID,
+        *,
+        replace_pinned: bool = False,
+        refresh: bool = False,
+    ) -> Filled:
+        """Like extract_cell, but also says what the fill cost (a run needs this to keep its cap)."""
         column = await self._column_in(workspace_id, column_id)
         if not await repo.entity_in_workspace(self._pool, entity_id, workspace_id):
             raise EntityNotFoundError(str(entity_id))
@@ -83,9 +123,9 @@ class MatrixService:
 
         entity_name = await repo.entity_name(self._pool, entity_id) or "the company"
         outcome = await self._extractor.extract(
-            workspace_id, entity_id, entity_name, column
+            workspace_id, entity_id, entity_name, column, refresh=refresh
         )
-        return await mrepo.save_cell(
+        cell = await mrepo.save_cell(
             self._pool,
             workspace_id=workspace_id,
             entity_id=entity_id,
@@ -93,6 +133,30 @@ class MatrixService:
             outcome=outcome,
             replace_pinned=replace_pinned,
         )
+        return Filled(
+            cell=cell,
+            cost_usd=outcome.cost_usd,
+            unknown_cost_calls=outcome.unknown_cost_calls,
+            model_calls=outcome.model_calls,
+        )
+
+    async def record_failure(
+        self, workspace_id: UUID, entity_id: UUID, column_id: UUID, detail: str
+    ) -> None:
+        """A cell that could not be filled at all (a timeout, an unexpected error) is recorded as
+        pending_or_error with a reason, so the grid shows it, not a silent gap. A pinned cell is
+        left alone."""
+        column = await self._column_in(workspace_id, column_id)
+        try:
+            await mrepo.save_cell(
+                self._pool,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                column=column,
+                outcome=CellOutcome(status="pending_or_error", detail=detail),
+            )
+        except mrepo.CellPinnedError:
+            pass
 
     async def get_cell(self, workspace_id: UUID, cell_id: UUID) -> CellRecord | None:
         cell = await mrepo.get_cell(self._pool, cell_id)
@@ -165,5 +229,6 @@ def build_matrix_service(
         provider=provider,
         model=model,
         recorder=recorder or db_recorder(pool),
+        cache=PgLlmCache(pool) if settings.llm_cache else None,
     )
     return MatrixService(pool, settings, extractor)

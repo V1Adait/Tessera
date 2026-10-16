@@ -102,6 +102,7 @@ async def extract_cell(
             body.entity_id,
             body.column_id,
             replace_pinned=body.replace_pinned,
+            refresh=body.refresh,
         )
     except mrepo.ColumnNotFoundError:
         raise _not_found("column") from None

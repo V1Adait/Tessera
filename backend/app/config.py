@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -104,6 +105,13 @@ class Settings(BaseSettings):
     # ~3x cheaper but gave 2 wrong values before two safety-net fixes: worth re-testing.
     extract_model: str = "anthropic/claude-haiku-5.5"
     extract_max_tokens: int = 700  # the reply is a short JSON object
+    # When the first look finds nothing or something untrustworthy, look once more with a wider net.
+    # (Found on the Apple 10-K: the answer to two columns ranked 10th and 11th, just outside the top 5.)
+    extract_escalate: bool = True
+    extract_escalation_parents: int = 10
+    extract_escalation_candidates: int = 60
+    # Identical extraction calls are answered from the llm_cache table (see llm_cache.py).
+    llm_cache: bool = True
     extract_seed: int | None = (
         7  # asked of providers that honour it; see eval/probe_determinism.py
     )
@@ -115,6 +123,24 @@ class Settings(BaseSettings):
     )
     extract_low_confidence: float = (
         0.7  # evidence from a chunk at or below this is not trusted
+    )
+
+    # Matrix runs: filling many cells at once. A run shows an estimate first, has a spending cap, and
+    # fills a few cells at a time so the model provider's rate limit is not hit.
+    run_concurrency: int = 4
+    run_default_cap_usd: Decimal = Decimal(
+        "0.50"
+    )  # a run stops by itself after spending this
+    run_max_cap_usd: Decimal = Decimal(25)  # the highest cap a request may ask for
+    run_confirm_above_usd: Decimal = Decimal(
+        "0.05"
+    )  # a bigger estimate needs a yes first
+    run_confirm_above_cells: int = 25  # so does a bigger run, whatever it costs
+    run_cell_timeout_s: float = (
+        180.0  # one cell that takes longer is recorded as failed
+    )
+    run_calls_per_cell: float = (
+        1.3  # model calls per cell: a retry or a wider look adds some
     )
 
     # Query handling: classify the question, then plan it. See backend/app/query/.

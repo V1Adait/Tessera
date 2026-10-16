@@ -13,6 +13,7 @@ from backend.app.api_costs import router as costs_router
 from backend.app.api_documents import router as documents_router
 from backend.app.api_matrix import router as matrix_router
 from backend.app.api_query import router as query_router
+from backend.app.api_runs import router as runs_router
 from backend.app.api_search import router as search_router
 from backend.app.api_workspaces import router as workspaces_router
 from backend.app.config import Settings, get_settings
@@ -25,6 +26,7 @@ from backend.app.embeddings.embedder import OpenRouterEmbedder, make_embedding_c
 from backend.app.embeddings.indexer import Indexer
 from backend.app.embeddings.store import QdrantStore, make_qdrant_client
 from backend.app.llm import get_default_llm
+from backend.app.matrix.runs import RunManager
 from backend.app.matrix.service import build_matrix_service
 from backend.app.query.service import build_query_service
 from backend.app.retrieval.sparse import Bm25Encoder
@@ -90,6 +92,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.query = None
     app.state.indexer = None
     app.state.matrix = None
+    app.state.runs = None
     if settings.database_url:
         pool = await create_pool(settings)
         pending = await pending_migrations(pool)
@@ -104,6 +107,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.indexer = indexer
         app.state.documents = DocumentService(pool, settings, indexer=indexer)
         app.state.matrix = build_matrix_service(pool, settings, indexer)
+        if app.state.matrix is not None:
+            app.state.runs = RunManager(pool, settings, app.state.matrix)
+            cut_off = await app.state.runs.recover()
+            if cut_off:
+                log.warning(
+                    "%s matrix run(s) were cut off by the last shutdown", cut_off
+                )
         app.state.query = build_query_service(pool, settings)
         interrupted = await repo.recover_interrupted(pool)
         if interrupted:
@@ -128,6 +138,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if app.state.documents is not None:
             await app.state.documents.close()
+        if app.state.runs is not None:
+            await app.state.runs.close()
         if app.state.query is not None:
             await app.state.query.close()
         if app.state.indexer is not None:
@@ -152,5 +164,6 @@ app.include_router(workspaces_router)
 app.include_router(documents_router)
 app.include_router(query_router)
 app.include_router(matrix_router)
+app.include_router(runs_router)
 app.include_router(costs_router)
 app.include_router(search_router)
