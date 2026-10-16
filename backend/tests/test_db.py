@@ -222,6 +222,7 @@ async def test_trace_round_trip(pool):
             tokens_in=479,
             tokens_out=15,
             cost_usd=Decimal("0.000123"),
+            cost_source="provider",
             latency_ms=900,
             first_token_ms=300,
         ),
@@ -235,6 +236,7 @@ async def test_trace_round_trip(pool):
         15,
         Decimal("0.000123"),
     )
+    assert trace.cost_source == "provider"  # a cost always says where it came from
     assert trace.created_at is not None  # filled in by the database
 
 

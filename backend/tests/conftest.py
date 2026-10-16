@@ -47,3 +47,13 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
         await test_pool.close()
         await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
         await admin.close()
+
+
+@pytest.fixture(autouse=True)
+def empty_price_book():
+    """The price list is shared by the whole process, so no test may see another's prices."""
+    from backend.app.costs import PriceBook, set_price_book
+
+    set_price_book(PriceBook())
+    yield
+    set_price_book(PriceBook())

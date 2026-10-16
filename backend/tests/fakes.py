@@ -111,6 +111,7 @@ class SummaryFake(BaseChatModel):
     reply: str = "- user is researching Visa\n- prefers short answers"
     error: Exception | None = None
     seen: list[Any] = Field(default_factory=list)
+    reported_cost: float | None = None
 
     @property
     def _llm_type(self) -> str:
@@ -126,6 +127,11 @@ class SummaryFake(BaseChatModel):
             content=self.reply,
             usage_metadata=UsageMetadata(
                 input_tokens=300, output_tokens=40, total_tokens=340
+            ),
+            response_metadata=(
+                {"token_usage": {"cost": self.reported_cost}}
+                if self.reported_cost is not None
+                else {}
             ),
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
@@ -160,6 +166,7 @@ class QueueFake(BaseChatModel):
 
     replies: list[Any] = Field(default_factory=list)
     seen: list[Any] = Field(default_factory=list)
+    reported_cost: float | None = None  # what the "provider" says each reply cost
 
     @property
     def _llm_type(self) -> str:
@@ -176,6 +183,11 @@ class QueueFake(BaseChatModel):
             content=item,
             usage_metadata=UsageMetadata(
                 input_tokens=50, output_tokens=10, total_tokens=60
+            ),
+            response_metadata=(
+                {"token_usage": {"cost": self.reported_cost}}
+                if self.reported_cost is not None
+                else {}
             ),
         )
         return ChatResult(generations=[ChatGeneration(message=message)])

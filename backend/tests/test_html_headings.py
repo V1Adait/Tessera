@@ -142,3 +142,47 @@ def test_table_header_cells_are_not_turned_into_headings(tmp_path):
     )
 
     assert [b.type for b in doc.blocks] == ["table"]
+
+
+# --- units found beside a table ---------------------------------------------------------------
+
+
+def units_of(tmp_path, body: str):
+    doc = parse(tmp_path, body)
+    return next(b.table.units for b in doc.blocks if b.type == "table")
+
+
+def test_units_in_the_second_header_row_are_found(tmp_path):
+    body = (
+        "<table><tr><td></td><td>Maturities</td><td>2025</td></tr>"
+        "<tr><td></td><td></td><td>Amount(in millions)</td></tr>"
+        "<tr><td>Notes</td><td>2030</td><td>$86,781</td></tr></table>"
+    )
+
+    assert units_of(tmp_path, body) == "in millions"
+
+
+def test_units_at_the_end_of_the_paragraph_above_are_found_not_the_start(tmp_path):
+    long_intro = (
+        "In thousands of items, "
+        + "word " * 100
+        + "the table below is stated (in millions)."
+    )
+    body = f"<p>{long_intro}</p><table><tr><td>Item</td><td>2025</td></tr><tr><td>Sales</td><td>5</td></tr></table>"
+
+    assert units_of(tmp_path, body) == "in millions"
+
+
+def test_the_tables_own_header_wins_over_a_paragraph_above(tmp_path):
+    body = (
+        "<p>Other amounts are shown in thousands.</p>"
+        "<table><tr><td>(in millions)</td><td>2025</td></tr><tr><td>Sales</td><td>5</td></tr></table>"
+    )
+
+    assert units_of(tmp_path, body) == "in millions"
+
+
+def test_a_table_that_states_no_units_has_none(tmp_path):
+    body = "<p>Results follow.</p><table><tr><td>Item</td><td>2025</td></tr><tr><td>Sales</td><td>5</td></tr></table>"
+
+    assert units_of(tmp_path, body) is None
