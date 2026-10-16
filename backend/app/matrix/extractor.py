@@ -19,6 +19,7 @@ Failures are explicit: a model error, an unusable reply or a retrieval failure m
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 import asyncpg
@@ -29,7 +30,8 @@ from pydantic import ValidationError
 from backend.app.chunking.expand import ParentView, expand_to_parents
 from backend.app.config import Settings
 from backend.app.db import repository as repo
-from backend.app.db.records import ChunkHit, ChunkRecord
+from backend.app.db.records import ChunkHit, ChunkRecord, TraceRecord
+from backend.app.llm_cache import LlmCache
 from backend.app.matrix.models import (
     CellOutcome,
     ColumnRecord,
@@ -236,6 +238,7 @@ def decide(
                 display=normalised.display,
                 value_type=column.type,
                 evidence=verified,
+                retry_wider=True,
             )
         )
     weak = [v for v in verified if v.chunk_confidence <= low_confidence_at]
@@ -252,6 +255,7 @@ def decide(
                 display=normalised.display,
                 value_type=column.type,
                 evidence=verified,
+                retry_wider=True,
             )
         )
     return _Decision(
@@ -311,6 +315,46 @@ def _unscaled_table_amount(
 
 # --- the extractor ----------------------------------------------------------------------------
 
+# Which outcome is better when a wider second look disagrees with the first. The second look
+# replaces the first only if it is strictly better, so it can never make a cell worse.
+_RANK = {
+    "answered": 5,
+    "conflicting": 4,
+    "not_applicable": 2,
+    "not_found": 1,
+    "pending_or_error": 0,
+}
+
+
+def outcome_rank(outcome: CellOutcome) -> int:
+    if outcome.status == "low_confidence":
+        return (
+            3 if outcome.value is not None else 1
+        )  # a value we can show beats a bare refusal
+    return _RANK[outcome.status]
+
+
+class _Meter:
+    """Adds up what one cell's model calls cost, however many there were (a retry, a wider second
+    look). It sits between the extractor and the trace recorder, so the numbers are the ones that
+    were traced, and a cell's cost is known without a second source of truth."""
+
+    def __init__(self) -> None:
+        self.usd = Decimal(0)
+        self.unknown = 0
+        self.calls = 0
+
+    def wrap(self, recorder: Recorder) -> Recorder:
+        async def record(trace: TraceRecord) -> None:
+            self.calls += 1
+            if trace.cost_usd is not None:
+                self.usd += trace.cost_usd
+            elif trace.cost_source == "unknown":
+                self.unknown += 1
+            await recorder(trace)
+
+        return record
+
 
 class CellExtractor:
     def __init__(
@@ -323,7 +367,9 @@ class CellExtractor:
         provider: str,
         model: str,
         recorder: Recorder = no_recorder,
+        cache: LlmCache | None = None,
     ) -> None:
+        self._cache = cache
         self._llm = llm
         self._pool = pool
         self._settings = settings
@@ -332,9 +378,23 @@ class CellExtractor:
         self._model = model
         self._recorder = recorder
 
-    def _stamp(self, outcome: CellOutcome) -> CellOutcome:
+    def _cache_params(self) -> dict[str, object]:
+        """Settings that shape the reply and so belong in the cache key. Not the retrieval settings:
+        what retrieval returned is already in the messages."""
+        return {
+            "max_tokens": self._settings.extract_max_tokens,
+            "temperature": 0,
+            "seed": self._settings.extract_seed,
+            "provider": self._provider,
+        }
+
+    def _stamp(self, outcome: CellOutcome, meter: _Meter) -> CellOutcome:
         outcome.model = self._model
         outcome.prompt_version = EXTRACT_PROMPT_VERSION
+        outcome.cost_usd = meter.usd
+        outcome.unknown_cost_calls = meter.unknown
+        outcome.model_calls = meter.calls
+        outcome.retry_wider = False
         return outcome
 
     async def extract(
@@ -343,76 +403,133 @@ class CellExtractor:
         entity_id: UUID,
         entity_name: str,
         column: ColumnRecord,
+        *,
+        refresh: bool = False,
     ) -> CellOutcome:
-        """Never raises for a model, retrieval or parsing problem: those become the cell's status."""
-        return self._stamp(
-            await self._extract(workspace_id, entity_id, entity_name, column)
-        )
+        """Never raises for a model, retrieval or parsing problem: those become the cell's status.
 
-    async def _extract(
+        One look at the top parents. If it found nothing, or found something the code does not
+        trust (a flagged table, an unknown scale), ONE wider look follows, but only if the wider
+        search actually shows the model passages it has not seen. The better outcome wins."""
+        meter = _Meter()
+        first, seen = await self._run(
+            workspace_id,
+            entity_id,
+            entity_name,
+            column,
+            meter,
+            wide=False,
+            seen=None,
+            refresh=refresh,
+        )
+        if (
+            first is None
+        ):  # only a wider look (given `seen`) can return None; keeps types honest
+            first = CellOutcome(status="pending_or_error", detail="internal error")
+        outcome = first
+        if self._settings.extract_escalate and first.retry_wider:
+            wider, _ = await self._run(
+                workspace_id,
+                entity_id,
+                entity_name,
+                column,
+                meter,
+                wide=True,
+                seen=seen,
+                refresh=refresh,
+            )
+            if wider is not None and outcome_rank(wider) > outcome_rank(first):
+                outcome = wider
+        return self._stamp(outcome, meter)
+
+    async def _run(
         self,
         workspace_id: UUID,
         entity_id: UUID,
         entity_name: str,
         column: ColumnRecord,
-    ) -> CellOutcome:
+        meter: _Meter,
+        *,
+        wide: bool,
+        seen: frozenset[UUID] | None,
+        refresh: bool,
+    ) -> tuple[CellOutcome | None, frozenset[UUID]]:
+        """One search-and-ask. Returns the outcome and the ids of the chunks the model was shown.
+        With `seen` given (a wider second look), returns (None, ...) without asking the model if
+        the wider search shows nothing new."""
         if not await repo.list_documents(
             self._pool, workspace_id, entity_id=entity_id, limit=1
         ):
             return CellOutcome(
                 status="not_found", detail="this row has no documents yet"
-            )
+            ), frozenset()
 
+        parents_wanted = (
+            self._settings.extract_escalation_parents
+            if wide
+            else self._settings.retrieval_max_parents
+        )
+        candidates = (
+            self._settings.extract_escalation_candidates
+            if wide
+            else self._settings.extract_candidates
+        )
         try:
             hits = await self._retrieve(
-                workspace_id,
-                f"{column.name}: {column.prompt}",
-                entity_id,
-                self._settings.extract_candidates,
+                workspace_id, f"{column.name}: {column.prompt}", entity_id, candidates
             )
-            parents = await expand_to_parents(
-                self._pool, hits, self._settings.retrieval_max_parents
-            )
+            parents = await expand_to_parents(self._pool, hits, parents_wanted)
         except Exception:  # retrieval is a dependency: its failure is the cell's status
             logger.exception("retrieval failed while filling a cell")
             return CellOutcome(
                 status="pending_or_error",
                 detail="searching the documents failed; try again",
-            )
-        if not parents:
-            return CellOutcome(
-                status="not_found",
-                detail="no passage in this row's documents matched the question",
-            )
-
+            ), frozenset()
         filenames = {h.chunk.document_id: h.filename for h in hits}
-        context = build_context(
-            parents, filenames, self._settings.extract_context_tokens
+        context = (
+            build_context(parents, filenames, self._settings.extract_context_tokens)
+            if parents
+            else []
         )
+        shown = frozenset(c.chunk.id for c in context)
         if not context:
             return CellOutcome(
                 status="not_found",
                 detail="no passage in this row's documents matched the question",
-            )
-        return await self._ask(column, entity_name, context)
+            ), shown
+        if seen is not None and shown <= seen:
+            return (
+                None,
+                shown,
+            )  # a wider look would show the model nothing new: do not pay for it
+        return await self._ask(column, entity_name, context, meter, refresh), shown
 
     async def _ask(
-        self, column: ColumnRecord, entity_name: str, context: list[LabelledChunk]
+        self,
+        column: ColumnRecord,
+        entity_name: str,
+        context: list[LabelledChunk],
+        meter: _Meter,
+        refresh: bool,
     ) -> CellOutcome:
         problem: str | None = None
         claimed: str | None = None
         unusable = False
+        recorder = meter.wrap(self._recorder)
         for attempt in (1, 2):
             messages = build_messages(column, entity_name, context, problem)
             try:
                 raw = await ask_json(
                     self._llm,
                     messages,
-                    recorder=self._recorder,
+                    recorder=recorder,
                     kind="extract",
                     provider=self._provider,
                     model=self._model,
                     prompt_version=EXTRACT_PROMPT_VERSION,
+                    cache=self._cache,
+                    cache_params=self._cache_params(),
+                    refresh=refresh,
                 )
             except ModelCallError as exc:
                 if exc.code == "bad_output" and attempt == 1:
@@ -437,6 +554,10 @@ class CellExtractor:
                 final_attempt=attempt == 2,
             )
             if decision.outcome is not None:
+                if decision.outcome.status == "not_found":
+                    decision.outcome.retry_wider = (
+                        True  # the model looked and found nothing
+                    )
                 return decision.outcome
             unusable = False
             claimed = decision.proposal

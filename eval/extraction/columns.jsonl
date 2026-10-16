@@ -1,0 +1,20 @@
+{"id":"net_sales","name":"Total net sales","prompt":"Total net sales for the most recent fiscal year","type":"currency","expect":"answered","value":"416161000000"}
+{"id":"iphone","name":"iPhone net sales","prompt":"iPhone net sales for the most recent fiscal year","type":"currency","expect":"answered","value":"209586000000"}
+{"id":"op_income","name":"Operating income","prompt":"Operating income for the most recent fiscal year","type":"currency","expect":"answered","value":"133050000000"}
+{"id":"eps","name":"Diluted EPS","prompt":"Diluted earnings per share for the most recent fiscal year","type":"currency","expect":"answered","value":"7.46"}
+{"id":"rnd","name":"R&D expense","prompt":"Research and development expense for the most recent fiscal year","type":"currency","expect":"answered","value":"34550000000"}
+{"id":"cash","name":"Cash and equivalents","prompt":"Cash and cash equivalents at the end of the most recent fiscal year","type":"currency","expect":"answered","value":"35934000000"}
+{"id":"term_debt","name":"Non-current term debt","prompt":"Non-current term debt at the end of the most recent fiscal year","type":"currency","expect":"answered","value":"78328000000"}
+{"id":"total_assets","name":"Total assets","prompt":"Total assets at the end of the most recent fiscal year","type":"currency","expect":"answered","value":"359241000000"}
+{"id":"tax_rate","name":"Effective tax rate","prompt":"Effective tax rate for the most recent fiscal year","type":"number","expect":"answered","value":"15.6"}
+{"id":"employees","name":"Employees","prompt":"Number of full-time equivalent employees","type":"number","expect":"answered","value":"166000"}
+{"id":"shares_out","name":"Shares outstanding","prompt":"Shares of common stock outstanding on the date given on the cover page","type":"number","expect":"answered","value":"14776353000"}
+{"id":"fye","name":"Fiscal year end","prompt":"Fiscal year end date of the most recent fiscal year","type":"date","expect":"answered","value":"2025-09-27"}
+{"id":"hq","name":"Headquarters","prompt":"Where is the company headquartered?","type":"text","expect":"answered","value":"cupertino"}
+{"id":"auditor","name":"Auditor","prompt":"Name of the independent registered public accounting firm","type":"text","expect":"answered","value":"ernst & young"}
+{"id":"dividend","name":"Quarterly dividend","prompt":"Current quarterly cash dividend per share","type":"currency","expect":"answered","value":"0.26"}
+{"id":"buyback","name":"Share repurchase program","prompt":"Does the company have an authorized share repurchase program?","type":"yes_no","expect":"answered","value":"true"}
+{"id":"top_segment","name":"Largest segment","prompt":"Geographic segment with the highest net sales in the most recent fiscal year","type":"select","allowed_values":["Americas","Europe","Greater China","Japan","Rest of Asia Pacific"],"expect":"answered","value":"Americas"}
+{"id":"ceo_salary","name":"CEO base salary","prompt":"Base salary of the chief executive officer","type":"currency","expect":"not_found"}
+{"id":"goodwill","name":"Goodwill impairment","prompt":"Goodwill impairment charge recorded in the most recent fiscal year","type":"currency","expect":"not_found"}
+{"id":"convertible","name":"Conversion price","prompt":"Conversion price of the company's convertible notes","type":"currency","expect":"not_found"}

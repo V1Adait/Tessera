@@ -9,6 +9,7 @@ Two kinds of shape, kept apart on purpose:
 """
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
@@ -173,6 +174,17 @@ class CellOutcome(BaseModel):
     evidence: list[VerifiedEvidence] = Field(default_factory=list)
     model: str | None = None
     prompt_version: str | None = None
+    # Bookkeeping about HOW the outcome was reached. Not stored with the cell.
+    retry_wider: bool = Field(
+        default=False, exclude=True
+    )  # a wider search might do better
+    cost_usd: Decimal = Field(
+        default=Decimal(0), exclude=True
+    )  # all model calls for this fill
+    unknown_cost_calls: int = Field(
+        default=0, exclude=True
+    )  # calls whose cost is not known
+    model_calls: int = Field(default=0, exclude=True)
 
 
 # --- stored cells -----------------------------------------------------------------------------
@@ -221,3 +233,4 @@ class ExtractRequest(BaseModel):
     replace_pinned: bool = (
         False  # overwriting a cell a person set needs this to be true
     )
+    refresh: bool = False  # ignore the stored model reply and ask the model again

@@ -45,17 +45,14 @@ from backend.app.embeddings.embedder import (
 )
 from backend.app.embeddings.indexer import Indexer
 from backend.app.embeddings.store import QdrantStore, make_qdrant_client
+from backend.app.retrieval.fusion import rrf
+from backend.app.retrieval.sparse import Bm25Encoder
+from backend.app.retrieval.terms import or_query
 from backend.app.tracing import db_recorder
 
 KS = (1, 3, 5, 10)
 PARENTS = 5
 FETCH = max(KS)
-_WORD = re.compile(r"[A-Za-z0-9$%.,'&-]+")
-_STOP = {
-    "what", "was", "were", "is", "are", "the", "a", "an", "of", "in", "on", "for", "to", "and",
-    "or", "does", "do", "did", "how", "much", "many", "which", "who", "when", "where", "its",
-    "it", "as", "by", "at", "with", "from", "that", "this", "has", "have", "had", "be", "been",
-}  # fmt: skip
 
 
 def squash(text: str) -> str:
@@ -63,14 +60,6 @@ def squash(text: str) -> str:
     empty cells sat between them: a table's column layout is not part of what it says."""
     text = re.sub(r"\s*\|(?:\s*\|)*\s*", " | ", text)
     return re.sub(r"\s+", " ", text).strip().lower()
-
-
-def or_query(question: str) -> str:
-    """The question's content words joined with OR: the fair full-text baseline. The search as
-    built ANDs every word, so a long natural-language question usually matches nothing."""
-    words = [w.strip(".,'-").lower() for w in _WORD.findall(question)]
-    words = [w for w in words if w and w not in _STOP]
-    return " or ".join(dict.fromkeys(words))
 
 
 def is_hit(text: str, gold: list[str]) -> bool:
@@ -124,7 +113,7 @@ def summarise(name: str, outcomes: list[Outcome]) -> dict:
 def print_table(rows: list[dict]) -> None:
     n = rows[0]["n"]
     heads = [f"R@{k}" for k in KS] + [f"parentR@{PARENTS}", "MRR", "empty", "med s"]
-    print(f"\n{'method':26s}" + "".join(f"{h:>10s}" for h in heads) + f"     (n = {n})")
+    print(f"\n{'method':28s}" + "".join(f"{h:>10s}" for h in heads) + f"     (n = {n})")
     for r in rows:
         cells = [f"{r[f'recall@{k}']}" for k in KS]
         cells += [
@@ -133,13 +122,13 @@ def print_table(rows: list[dict]) -> None:
             f"{r['no_results']}",
             f"{r['median_s']:.2f}",
         ]
-        print(f"{r['method']:26s}" + "".join(f"{c:>10s}" for c in cells))
+        print(f"{r['method']:28s}" + "".join(f"{c:>10s}" for c in cells))
     print(
         f"\ntokens in the top-{PARENTS} parents per question (what the extractor would read):"
     )
     for r in rows:
         median, biggest = r["parent_tokens_median"], r["parent_tokens_max"]
-        print(f"  {r['method']:26s} median {median:>6,} | max {biggest:>6,}")
+        print(f"  {r['method']:28s} median {median:>6,} | max {biggest:>6,}")
 
 
 async def build(settings: Settings, filing: Path, entity: str, schema: str):
@@ -174,7 +163,8 @@ async def build(settings: Settings, filing: Path, entity: str, schema: str):
         model=settings.embedding_model,
         payload_indexes=bool(settings.qdrant_url),
     )
-    indexer = Indexer(pool, settings, embedder, store)
+    sparse = Bm25Encoder(settings.sparse_model, cache_dir=settings.sparse_cache_dir)
+    indexer = Indexer(pool, settings, embedder, store, sparse)
     service = DocumentService(pool, settings, indexer=indexer)
     return admin, pool, workspace, ent.id, client, store, indexer, service, prefix
 
@@ -219,7 +209,7 @@ async def main() -> None:
         update={"upload_dir": str(upload_dir), "index_on_startup": False}
     )
     schema = f"evalr_{uuid4().hex[:10]}"
-    admin = pool = client = indexer = None
+    admin = pool = client = indexer = run_prefix = None
     try:
         (
             admin,
@@ -230,7 +220,7 @@ async def main() -> None:
             _store,
             indexer,
             service,
-            _prefix,
+            run_prefix,
         ) = await build(settings, args.filing, args.entity, schema)
         pending = [args.filing.read_bytes()]
 
@@ -261,14 +251,36 @@ async def main() -> None:
         if doc.index_status != "indexed":
             raise SystemExit("indexing failed: cannot evaluate vector search")
 
+        def hybrid(**tuning: float):
+            async def run(q: str) -> list[ChunkHit]:
+                return (await indexer.hybrid_search(ws, q, limit=FETCH, **tuning)).hits
+
+            return run
+
+        async def postgres_plus_vector(q: str) -> list[ChunkHit]:
+            """The previous hybrid (Postgres full text + vector), rebuilt here with the same
+            fusion so the before and after come from one run."""
+            text = await repo.search_chunks_text(pool, ws, or_query(q), limit=50)
+            dense = await indexer.search(ws, q, limit=50)
+            by_id = {h.chunk.id: h for h in [*text, *dense]}
+            fused = rrf([[h.chunk.id for h in text], [h.chunk.id for h in dense]])
+            return [
+                ChunkHit(chunk=by_id[i].chunk, filename=by_id[i].filename, score=score)
+                for i, score in fused[:FETCH]
+            ]
+
         methods = {
-            "full-text (AND, as built)": lambda q: repo.search_chunks_text(
+            "Postgres text (AND)": lambda q: repo.search_chunks_text(
                 pool, ws, q, limit=FETCH
             ),
-            "full-text (OR of terms)": lambda q: repo.search_chunks_text(
+            "Postgres text (OR)": lambda q: repo.search_chunks_text(
                 pool, ws, or_query(q), limit=FETCH
             ),
-            "vector": lambda q: indexer.search(ws, q, limit=FETCH),
+            "BM25 (keyword)": lambda q: indexer.keyword_search(ws, q, limit=FETCH),
+            "vector (dense)": lambda q: indexer.search(ws, q, limit=FETCH),
+            "hybrid: Postgres + vector": postgres_plus_vector,
+            "hybrid: BM25 + vector": hybrid(),
+            "hybrid: BM25 + vector x2": hybrid(dense_weight=2.0),
         }
         outcomes: dict[str, list[Outcome]] = {m: [] for m in methods}
         for q in questions:
@@ -282,11 +294,7 @@ async def main() -> None:
         for i, q in enumerate(questions):
             ranks = {m: outcomes[m][i].first_rank for m in methods}
             if any(r is None or r > 5 for r in ranks.values()):
-                short = {
-                    m.split(" ")[0]
-                    + ("-or" if "OR" in m else "-and" if "AND" in m else ""): r
-                    for m, r in ranks.items()
-                }
+                short = {m: r for m, r in ranks.items()}
                 print(f"  {q['id']:5s} {q['question'][:62]:62s} {short}")
 
         spent = await pool.fetchval(
@@ -325,10 +333,13 @@ async def main() -> None:
             if admin is not None:
                 await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
                 await admin.close()
-            await cleanup_collections(settings)
+            if run_prefix is not None:
+                await cleanup_collections(settings, run_prefix)
 
 
-async def cleanup_collections(settings: Settings) -> None:
+async def cleanup_collections(settings: Settings, prefix: str = "evalr_") -> None:
+    """Remove the collections THIS run made. The prefix is the run's own (evalr_<random>), so two
+    runs going at once can never delete each other's collections."""
     from qdrant_client import AsyncQdrantClient
 
     if not settings.qdrant_url:
@@ -336,8 +347,21 @@ async def cleanup_collections(settings: Settings) -> None:
     c = AsyncQdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
     try:
         for col in (await c.get_collections()).collections:
-            if col.name.startswith("evalr_"):
-                await c.delete_collection(col.name)
+            if not col.name.startswith(prefix):
+                continue
+            for attempt in range(
+                5
+            ):  # Windows may refuse while the server still has files open
+                try:
+                    await c.delete_collection(col.name)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == 4:
+                        print(
+                            f"could not remove collection {col.name}: {type(exc).__name__}"
+                        )
+                    else:
+                        await asyncio.sleep(0.5 * (attempt + 1))
     finally:
         await c.close()
 
