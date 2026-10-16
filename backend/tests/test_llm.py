@@ -225,3 +225,37 @@ async def test_request_id_is_passed_through_and_generated():
     generated = [e async for e in stream_chat(prompt(), ProviderLikeFake())]
     assert isinstance(generated[-1].request_id, UUID)
     assert generated[-1].request_id != fixed
+
+
+# --- get_llm: temperature and seed are passed on --------------------------------------------
+
+
+def _settings_with_keys():
+    from backend.tests.fakes import make_settings
+
+    return make_settings().model_copy(
+        update={"openrouter_api_key": "k", "openai_api_key": "k"}
+    )
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "openai"])
+def test_get_llm_passes_the_temperature_and_seed_it_is_given(provider):
+    from backend.app.llm import get_llm
+
+    llm = get_llm(
+        _settings_with_keys(),
+        provider=provider,
+        model="some/model",
+        temperature=0,
+        seed=7,
+    )
+
+    assert llm.temperature == 0 and llm.seed == 7  # type: ignore[attr-defined]
+
+
+def test_get_llm_sends_no_seed_unless_asked():
+    from backend.app.llm import get_llm
+
+    llm = get_llm(_settings_with_keys(), provider="openrouter", model="some/model")
+
+    assert llm.seed is None  # type: ignore[attr-defined]
