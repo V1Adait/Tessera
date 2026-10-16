@@ -17,6 +17,7 @@ from langchain_core.messages import BaseMessage
 from backend.app.costs import Cost, get_price_book, reported_cost, resolve_cost
 from backend.app.db.records import TraceKind, TraceRecord
 from backend.app.llm import classify_error
+from backend.app.llm_cache import LlmCache, cache_key
 from backend.app.tracing import Recorder
 
 logger = logging.getLogger(__name__)
@@ -60,8 +61,31 @@ async def ask_json(
     provider: str,
     model: str,
     prompt_version: str,
+    cache: LlmCache | None = None,
+    cache_params: dict[str, Any] | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
-    """Call the model, write one trace row (ok or error), return the parsed JSON object."""
+    """Call the model, write one trace row (ok or error), return the parsed JSON object.
+
+    With a cache, an identical call is answered from storage: no model call, so no trace row (a
+    trace is one row per LLM call) and no cost. `refresh` skips the lookup and overwrites the entry.
+    A cache that fails is logged and ignored: it can make a call slower, never wrong."""
+    key = None
+    if cache is not None:
+        key = cache_key(
+            messages, model=model, prompt_version=prompt_version, params=cache_params
+        )
+        if not refresh:
+            try:
+                stored = await cache.get(key)
+            except Exception:
+                logger.exception("llm cache lookup failed")
+                stored = None
+            if stored is not None:
+                try:
+                    return parse_json_object(stored)
+                except ModelCallError:
+                    pass  # an unusable entry: ask the model and overwrite it
     started = time.perf_counter()
     tokens_in = tokens_out = None
     try:
@@ -97,7 +121,19 @@ async def ask_json(
         tokens_out=tokens_out,
         cost=cost,
     )
-    return parse_json_object(str(reply.text))
+    parsed = parse_json_object(str(reply.text))  # only a usable reply is worth keeping
+    if cache is not None and key is not None:
+        try:
+            await cache.put(
+                key,
+                kind=kind,
+                model=model,
+                reply=str(reply.text),
+                cost_usd=cost.usd if cost else None,
+            )
+        except Exception:
+            logger.exception("llm cache write failed")
+    return parsed
 
 
 async def _record(

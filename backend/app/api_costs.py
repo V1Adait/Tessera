@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from backend.app.db import repository as repo
 from backend.app.db.pool import get_pool
+from backend.app.llm_cache import CacheStats, PgLlmCache
 
 router = APIRouter(tags=["costs"])
 
@@ -34,6 +35,7 @@ class CostReport(BaseModel):
         int  # calls priced from tokens x published price, not reported by the provider
     )
     lines: list[repo.CostLine]
+    cache: CacheStats  # replies served from storage: no call made, nothing spent
 
 
 @router.get("/costs", response_model=CostReport)
@@ -51,4 +53,5 @@ async def costs(
         unknown_cost_calls=sum(line.unknown_cost_calls for line in lines),
         estimated_calls=sum(line.estimated_calls for line in lines),
         lines=lines,
+        cache=await PgLlmCache(pool).stats(),
     )
