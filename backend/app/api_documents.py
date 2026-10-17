@@ -23,11 +23,13 @@ from fastapi import (
 from pydantic import BaseModel
 
 from backend.app.config import Settings, get_settings
+from backend.app.db import intake_repository as irepo
 from backend.app.db import repository as repo
 from backend.app.db.pool import get_pool
 from backend.app.db.records import BlockKind, BlockRecord, ChunkRecord, DocumentRecord
 from backend.app.documents_service import DocumentService, ParseBusyError
 from backend.app.ingest.intake import IntakeError
+from backend.app.intake.service import IntakeService
 
 router = APIRouter(tags=["documents"])
 
@@ -233,3 +235,65 @@ async def index_document(
         block_count=await repo.count_blocks(pool, document_id),
         chunk_count=await repo.count_chunks(pool, document_id),
     )
+
+
+class IntakeView(BaseModel):
+    """What happened to a file after it was parsed: which row it went to, or why it is waiting."""
+
+    outcome: str  # assigned | created | needs_review | skipped
+    entity_id: (
+        UUID | None
+    )  # the row the file is attached to NOW (a person may have changed it)
+    entity_name: str | None
+    detected: dict[str, object]  # company, ticker, doc_type, period, confidence
+    detail: str | None
+    candidates: list[str]
+
+
+def get_intake(request: Request) -> IntakeService | None:
+    return getattr(request.app.state, "intake", None)  # type: ignore[no-any-return]
+
+
+IntakeDep = Annotated[IntakeService | None, Depends(get_intake)]
+
+
+async def _intake_view(pool: asyncpg.Pool, document_id: UUID) -> IntakeView | None:
+    result = await irepo.get_result(pool, document_id)
+    document = await repo.get_document(pool, document_id)
+    if result is None or document is None:
+        return None
+    return IntakeView(
+        outcome=result.outcome,
+        entity_id=document.entity_id,
+        entity_name=await repo.entity_name(pool, document.entity_id),
+        detected=result.detected,
+        detail=result.detail,
+        candidates=result.candidates,
+    )
+
+
+@router.get("/documents/{document_id}/intake", response_model=IntakeView)
+async def document_intake(document_id: UUID, pool: PoolDep) -> IntakeView:
+    """Which row intake put the file in. 404 until intake has looked at it."""
+    await _require(pool, document_id)
+    view = await _intake_view(pool, document_id)
+    if view is None:
+        raise HTTPException(
+            status_code=404, detail="intake has not looked at this file yet"
+        )
+    return view
+
+
+@router.post("/documents/{document_id}/intake", response_model=IntakeView)
+async def rerun_intake(
+    document_id: UUID, pool: PoolDep, intake: IntakeDep
+) -> IntakeView:
+    """Ask intake to place the file again (a file already attached to a row is left alone)."""
+    await _require(pool, document_id)
+    if intake is None:
+        raise HTTPException(status_code=503, detail="intake is not configured")
+    await intake.process(document_id)
+    view = await _intake_view(pool, document_id)
+    if view is None:
+        raise HTTPException(status_code=409, detail="the file has not been parsed yet")
+    return view

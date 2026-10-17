@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from backend.app.db import repository as repo
 from backend.app.db.pool import get_pool
 from backend.app.db.records import EntityRecord, WorkspaceRecord
-from backend.app.models import NewEntity, NewWorkspace
+from backend.app.models import EntityUpdate, NewEntity, NewWorkspace
 
 router = APIRouter(tags=["workspaces"])
 
@@ -54,3 +54,32 @@ async def create_entity(
         raise HTTPException(
             status_code=409, detail="an entity with this name already exists"
         ) from None
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/entities/{entity_id}", response_model=EntityRecord
+)
+async def update_entity(
+    workspace_id: UUID, entity_id: UUID, body: EntityUpdate, pool: PoolDep
+) -> EntityRecord:
+    """Set or clear a company's ticker and/or website domain (the domain is what its logo is looked
+    up from). A ticker another row already has is refused: intake finds companies by ticker."""
+    if "ticker" in body.model_fields_set and body.ticker is not None:
+        owner = await repo.ticker_in_use(pool, workspace_id, body.ticker, entity_id)
+        if owner is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"the ticker {body.ticker} already belongs to '{owner}'",
+            )
+    updated = await repo.update_entity_details(
+        pool,
+        workspace_id,
+        entity_id,
+        ticker=body.ticker,
+        domain=body.domain,
+        set_ticker="ticker" in body.model_fields_set,
+        set_domain="domain" in body.model_fields_set,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="row not found")
+    return updated

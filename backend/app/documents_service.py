@@ -58,6 +58,9 @@ class DocumentService:
         self.indexer = (
             indexer  # when set, parsed documents are embedded in the background
         )
+        # Called with the document id once it is parsed and saved (intake places it in a row). A
+        # failure there is logged and never turns a good parse into a failed one.
+        self.on_parsed: Callable[[UUID], Awaitable[object]] | None = None
         self._slots = asyncio.Semaphore(max(1, settings.max_concurrent_parses))
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -151,6 +154,14 @@ class DocumentService:
             if self.indexer is not None:
                 self.indexer.schedule(document_id)
 
+    async def _after_parse(self, document_id: UUID) -> None:
+        if self.on_parsed is None:
+            return
+        try:
+            await self.on_parsed(document_id)
+        except Exception:
+            logger.exception("the after-parse step failed for document %s", document_id)
+
     async def _fail(self, document: DocumentRecord, reason: str) -> None:
         try:
             await repo.set_document_status(self.pool, document.id, "failed", reason)
@@ -189,6 +200,7 @@ class DocumentService:
             )
             if self.indexer is not None:
                 self.indexer.schedule(document.id)
+            await self._after_parse(document.id)
         except TimeoutError:
             # the worker thread cannot be killed; it finishes in the background and is ignored
             await self._fail(document, f"parsing took longer than {timeout:g} seconds")
