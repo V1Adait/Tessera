@@ -7,7 +7,7 @@ import {
 } from "./types";
 
 // Where the backend lives. Override with VITE_API_URL in frontend/.env.local if needed.
-const API_URL: string = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+export const API_URL: string = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -21,6 +21,7 @@ export class ApiError extends Error {
 
 export interface ChatCall {
   conversationId: string | null; // null starts a new conversation
+  workspaceId?: string | null; // which workspace a NEW conversation belongs to (its tools act there)
   message: string; // ONE new message: the server keeps the history
   onStart: (start: { conversationId: string; requestId: string }) => void;
   onEvent: (event: StreamEvent) => void;
@@ -39,18 +40,57 @@ export interface ChatCall {
  *  - a plain Error   if the network failed or the stream ended without a final event
  */
 export async function streamChat(call: ChatCall): Promise<void> {
-  const response = await fetch(`${API_URL}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  await streamRequest("/chat", {
+    ...call,
+    body: {
       conversation_id: call.conversationId,
       message: call.message,
-    }),
+      // Only a NEW conversation names its workspace: the server rejects both ids together.
+      ...(call.conversationId === null && call.workspaceId ? { workspace_id: call.workspaceId } : {}),
+    },
+  });
+}
+
+export interface AnswerCall {
+  actionId: string; // the confirmed plan whose filled cells the answer is written from
+  onStart: (start: { conversationId: string; requestId: string }) => void;
+  onEvent: (event: StreamEvent) => void;
+  signal?: AbortSignal;
+}
+
+/** Stream the answer to a confirmed plan's question, written from the cells it filled. The server
+ * answers 409 (with its reason) while the table is still being filled. */
+export async function streamAnswer(call: AnswerCall): Promise<void> {
+  await streamRequest(`/actions/${call.actionId}/answer`, { ...call, body: {} });
+}
+
+interface StreamRequest {
+  body: unknown;
+  onStart: (start: { conversationId: string; requestId: string }) => void;
+  onEvent: (event: StreamEvent) => void;
+  signal?: AbortSignal;
+}
+
+async function streamRequest(path: string, call: StreamRequest): Promise<void> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(call.body),
     signal: call.signal,
   });
 
   if (!response.ok) {
-    throw new ApiError(response.status, `The server rejected the request (${response.status}).`);
+    let reason = `The server rejected the request (${response.status}).`;
+    try {
+      const problem: unknown = await response.json();
+      if (typeof problem === "object" && problem !== null && "detail" in problem) {
+        const detail = (problem as { detail: unknown }).detail;
+        if (typeof detail === "string") reason = detail;
+      }
+    } catch {
+      // keep the generic text
+    }
+    throw new ApiError(response.status, reason);
   }
   if (response.body === null) {
     throw new Error("The server sent no response body.");

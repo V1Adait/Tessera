@@ -57,6 +57,19 @@ describe("streamChat", () => {
     });
   });
 
+  it("names the workspace only when it starts a NEW conversation", async () => {
+    const done = 'data: {"type":"done","request_id":"r","usage":{"tokens_in":1,"tokens_out":1}}\n\n';
+    const fresh = mockFetch(sseResponse([done], ids));
+    await call({ conversationId: null, workspaceId: "ws-1", message: "hi" }).promise;
+    const sent = (m: typeof fresh): Record<string, unknown> =>
+      JSON.parse((m.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(sent(fresh)).toEqual({ conversation_id: null, message: "hi", workspace_id: "ws-1" });
+
+    const existing = mockFetch(sseResponse([done], ids));
+    await call({ conversationId: "conv-9", workspaceId: "ws-1", message: "hi" }).promise;
+    expect(sent(existing)).toEqual({ conversation_id: "conv-9", message: "hi" }); // never both
+  });
+
   it("reports the conversation id from the header before any event", async () => {
     mockFetch(
       sseResponse(['data: {"type":"done","request_id":"r","usage":{"tokens_in":1,"tokens_out":1}}\n\n'], ids),

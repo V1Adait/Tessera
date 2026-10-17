@@ -1,3 +1,5 @@
+import { isPlanPayload, type PlanPayload } from "./planModel";
+
 // These mirror the backend models (backend/app/models.py and backend/app/db/records.py).
 // If you change one side, change the other.
 
@@ -16,6 +18,30 @@ export interface DoneEvent {
   type: "done";
   request_id: string;
   usage: Usage;
+  warnings?: string[]; // things the person should know about this answer
+}
+
+// The agent used a tool. Sent when it starts ("running") and again when it ends, with the same id.
+export type ToolStatus = "running" | "ok" | "error" | "needs_confirmation";
+
+export interface ToolStreamEvent {
+  type: "tool";
+  id: string;
+  name: string;
+  label: string;
+  status: ToolStatus;
+  summary: string;
+  changed_matrix: boolean; // the grid should reload
+}
+
+// The agent wants to do something costly or irreversible. Nothing has happened yet.
+export interface ConfirmationStreamEvent {
+  type: "confirmation";
+  action_id: string;
+  tool: string;
+  risk: "costly" | "destructive";
+  summary: string;
+  plan?: PlanPayload | null; // for a column plan: the columns, the cells and the cost
 }
 
 export type ErrorCode =
@@ -26,6 +52,7 @@ export type ErrorCode =
   | "unavailable"
   | "bad_request"
   | "context_too_large"
+  | "budget"
   | "unknown";
 
 export interface ErrorEvent {
@@ -36,7 +63,12 @@ export interface ErrorEvent {
   retryable: boolean;
 }
 
-export type StreamEvent = DeltaEvent | DoneEvent | ErrorEvent;
+export type StreamEvent =
+  | DeltaEvent
+  | DoneEvent
+  | ErrorEvent
+  | ToolStreamEvent
+  | ConfirmationStreamEvent;
 
 // A message as the server stores it (GET /conversations/{id}).
 export type StoredStatus = "streaming" | "complete" | "stopped" | "error";
@@ -51,9 +83,12 @@ export interface StoredMessage {
 
 export interface ConversationView {
   id: string;
+  workspace_id?: string;
   title: string | null;
   messages: StoredMessage[];
 }
+
+const TOOL_STATUSES: readonly string[] = ["running", "ok", "error", "needs_confirmation"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -67,7 +102,30 @@ export function isStreamEvent(value: unknown): value is StreamEvent {
     case "delta":
       return typeof value.text === "string";
     case "done":
-      return typeof value.request_id === "string" && isRecord(value.usage);
+      return (
+        typeof value.request_id === "string" &&
+        isRecord(value.usage) &&
+        (value.warnings === undefined ||
+          (Array.isArray(value.warnings) && value.warnings.every((w) => typeof w === "string")))
+      );
+    case "tool":
+      return (
+        typeof value.id === "string" &&
+        typeof value.name === "string" &&
+        typeof value.label === "string" &&
+        typeof value.status === "string" &&
+        TOOL_STATUSES.includes(value.status) &&
+        typeof value.summary === "string" &&
+        typeof value.changed_matrix === "boolean"
+      );
+    case "confirmation":
+      return (
+        typeof value.action_id === "string" &&
+        typeof value.tool === "string" &&
+        (value.risk === "costly" || value.risk === "destructive") &&
+        typeof value.summary === "string" &&
+        (value.plan === undefined || value.plan === null || isPlanPayload(value.plan))
+      );
     case "error":
       return (
         typeof value.request_id === "string" &&
