@@ -104,7 +104,9 @@ class Settings(BaseSettings):
     # result cache are what keep cells steady. gemini-2.5-flash-lite was perfectly repeatable and
     # ~3x cheaper but gave 2 wrong values before two safety-net fixes: worth re-testing.
     extract_model: str = "anthropic/claude-haiku-5.5"
-    extract_max_tokens: int = 700  # the reply is a short JSON object
+    # The reply is a short JSON object, but 700 was too tight in practice: replies of exactly 700
+    # tokens were cut off mid-JSON and became errors (seen live). Only tokens used are paid for.
+    extract_max_tokens: int = 2000
     # When the first look finds nothing or something untrustworthy, look once more with a wider net.
     # (Found on the Apple 10-K: the answer to two columns ranked 10th and 11th, just outside the top 5.)
     extract_escalate: bool = True
@@ -143,6 +145,34 @@ class Settings(BaseSettings):
         1.3  # model calls per cell: a retry or a wider look adds some
     )
 
+    # The chat agent: the model may call tools to read and change the matrix. Every limit below is a
+    # hard stop enforced in code, not a request to the model. See backend/app/agent/.
+    agent_enabled: bool = True
+    agent_max_steps: int = 6  # model calls in one turn (each may ask for several tools)
+    agent_turn_timeout_s: float = 120.0
+    agent_tool_timeout_s: float = 60.0
+    agent_turn_cost_cap_usd: Decimal = Decimal("0.25")  # model spend in one turn
+    session_cost_cap_usd: Decimal = Decimal(
+        "2.00"
+    )  # model spend in one conversation, all turns
+    agent_tool_result_chars: int = 6000  # the most a tool may hand back to the model
+    agent_search_passages: int = 6  # passages one search_documents call returns
+    agent_action_ttl_minutes: int = (
+        60  # a pending confirmation older than this is refused
+    )
+    agent_max_tools_per_step: int = 8  # tool calls the model may make in one step
+
+    # Intake: after a file is parsed, one cheap model call reads its first page to say which company
+    # it is about; code then finds or creates that row and attaches the file. See backend/app/intake/.
+    intake_enabled: bool = True
+    intake_provider: Provider = "openrouter"
+    intake_model: str = "anthropic/claude-haiku-5.5"
+    intake_max_tokens: int = 250
+    intake_max_chars: int = 3500  # how much of the first page the model reads
+    intake_min_confidence: float = (
+        0.75  # below this, the file waits and a person is asked
+    )
+
     # Query handling: classify the question, then plan it. See backend/app/query/.
     router_jev_model: str = "typesafe/jev-1.13"  # pinned: an alias would move under us
     router_provider: Provider = (
@@ -154,6 +184,9 @@ class Settings(BaseSettings):
     router_max_tokens: int = 300
     planner_max_tokens: int = 800
     planner_max_dimensions: int = 6  # rubric dimensions the planner may pick per entity
+    # The model's reply: up to 8 columns of JSON. 1200 was too tight in practice (a reply of exactly
+    # 1200 tokens was cut off mid-JSON); the prompt also asks for pack columns by key only.
+    plan_columns_max_tokens: int = 3000
     plan_soft_cap: int = 8  # more tasks than this need the user's confirmation
     plan_hard_cap: int = 50  # more than this is refused
 

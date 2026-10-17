@@ -24,6 +24,7 @@ dependencies = [
     "python-multipart>=0.0.32",
     "python-pptx>=1.0.2",
     "qdrant-client>=1.19.1",
+    "reportlab>=5.0.1",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -34,7 +35,6 @@ dev = [
     "pillow>=12.3.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "reportlab>=5.0.1",
     "ruff>=0.16.10",
 ]
 [tool.pytest.ini_options]

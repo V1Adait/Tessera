@@ -8,9 +8,13 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app.agent.runtime import AgentRuntime
+from backend.app.agent.tools import Services
 from backend.app.api import router
+from backend.app.api_agent import router as agent_router
 from backend.app.api_costs import router as costs_router
 from backend.app.api_documents import router as documents_router
+from backend.app.api_export import router as export_router
 from backend.app.api_matrix import router as matrix_router
 from backend.app.api_query import router as query_router
 from backend.app.api_runs import router as runs_router
@@ -25,9 +29,11 @@ from backend.app.documents_service import DocumentService
 from backend.app.embeddings.embedder import OpenRouterEmbedder, make_embedding_client
 from backend.app.embeddings.indexer import Indexer
 from backend.app.embeddings.store import QdrantStore, make_qdrant_client
+from backend.app.intake.service import build_intake_service
 from backend.app.llm import get_default_llm
 from backend.app.matrix.runs import RunManager
 from backend.app.matrix.service import build_matrix_service
+from backend.app.planning.planner import build_column_planner
 from backend.app.query.service import build_query_service
 from backend.app.retrieval.sparse import Bm25Encoder
 from backend.app.tracing import db_recorder
@@ -93,6 +99,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.indexer = None
     app.state.matrix = None
     app.state.runs = None
+    app.state.agent = None
+    app.state.intake = None
     if settings.database_url:
         pool = await create_pool(settings)
         pending = await pending_migrations(pool)
@@ -115,6 +123,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     "%s matrix run(s) were cut off by the last shutdown", cut_off
                 )
         app.state.query = build_query_service(pool, settings)
+        app.state.intake = build_intake_service(
+            pool, settings, app.state.documents.assign_entity
+        )
+        if app.state.intake is not None:
+            app.state.documents.on_parsed = app.state.intake.process
+        if settings.agent_enabled:
+            app.state.agent = AgentRuntime(
+                pool,
+                settings,
+                Services(
+                    matrix=app.state.matrix,
+                    runs=app.state.runs,
+                    documents=app.state.documents,
+                    indexer=indexer,
+                    planner=build_column_planner(pool, settings),
+                ),
+            )
         interrupted = await repo.recover_interrupted(pool)
         if interrupted:
             log.warning(
@@ -166,4 +191,6 @@ app.include_router(query_router)
 app.include_router(matrix_router)
 app.include_router(runs_router)
 app.include_router(costs_router)
+app.include_router(export_router)
+app.include_router(agent_router)
 app.include_router(search_router)

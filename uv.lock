@@ -2087,6 +2087,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "python-pptx" },
     { name = "qdrant-client" },
+    { name = "reportlab" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -2097,7 +2098,6 @@ dev = [
     { name = "pillow" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "reportlab" },
     { name = "ruff" },
 ]
 
@@ -2122,6 +2122,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "python-pptx", specifier = ">=1.0.2" },
     { name = "qdrant-client", specifier = ">=1.19.1" },
+    { name = "reportlab", specifier = ">=5.0.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
 
@@ -2132,7 +2133,6 @@ dev = [
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
-    { name = "reportlab", specifier = ">=5.0.1" },
     { name = "ruff", specifier = ">=0.16.10" },
 ]
 

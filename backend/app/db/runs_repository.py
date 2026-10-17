@@ -184,3 +184,11 @@ async def measured_cost_per_call(
         return None, 0
     total = sum((r["cost_usd"] for r in rows), Decimal(0))
     return total / len(rows), len(rows)
+
+
+async def running_run(db: Db, workspace_id: UUID) -> RunRecord | None:
+    row = await db.fetchrow(
+        f"SELECT {_COLUMNS} FROM matrix_runs WHERE workspace_id = $1 AND status = 'running'",
+        workspace_id,
+    )
+    return _run(row) if row else None

@@ -78,16 +78,24 @@ async def get_workspace(db: Db, workspace_id: UUID) -> WorkspaceRecord | None:
     return WorkspaceRecord(**dict(row)) if row else None
 
 
-async def create_entity(db: Db, workspace_id: UUID, name: str) -> EntityRecord:
+async def create_entity(
+    db: Db,
+    workspace_id: UUID,
+    name: str,
+    ticker: str | None = None,
+    domain: str | None = None,
+) -> EntityRecord:
     """Add a row to the matrix. Raises WorkspaceNotFoundError or DuplicateNameError."""
     try:
         row = await db.fetchrow(
             """
-            INSERT INTO entities (workspace_id, name) VALUES ($1, $2)
-            RETURNING id, workspace_id, name, position, created_at
+            INSERT INTO entities (workspace_id, name, ticker, domain) VALUES ($1, $2, $3, $4)
+            RETURNING id, workspace_id, name, position, created_at, ticker, aliases, domain
             """,
             workspace_id,
             name.strip(),
+            ticker,
+            domain,
         )
     except asyncpg.UniqueViolationError as exc:
         raise DuplicateNameError(name) from exc
@@ -100,7 +108,7 @@ async def create_entity(db: Db, workspace_id: UUID, name: str) -> EntityRecord:
 async def list_entities(db: Db, workspace_id: UUID) -> list[EntityRecord]:
     rows = await db.fetch(
         """
-        SELECT id, workspace_id, name, position, created_at
+        SELECT id, workspace_id, name, position, created_at, ticker, aliases, domain
         FROM entities WHERE workspace_id = $1 ORDER BY position
         """,
         workspace_id,
@@ -1052,3 +1060,111 @@ async def cost_summary(db: Db, since: datetime) -> list[CostLine]:
         since,
     )
     return [CostLine(**dict(r)) for r in rows]
+
+
+async def delete_entity(db: Db, workspace_id: UUID, entity_id: UUID) -> bool:
+    """Remove a row. Its cells go with it (foreign key cascade); its documents stay, unassigned.
+    False if there is no such row in this workspace."""
+    result = await db.execute(
+        "DELETE FROM entities WHERE id = $1 AND workspace_id = $2",
+        entity_id,
+        workspace_id,
+    )
+    return result == "DELETE 1"
+
+
+async def document_filenames(db: Db, document_ids: list[UUID]) -> dict[UUID, str]:
+    rows = await db.fetch(
+        "SELECT id, filename FROM documents WHERE id = ANY($1::uuid[])", document_ids
+    )
+    return {r["id"]: r["filename"] for r in rows}
+
+
+async def learn_entity_identity(
+    db: Db,
+    entity_id: UUID,
+    *,
+    ticker: str | None,
+    alias: str | None,
+    domain: str | None = None,
+) -> None:
+    """Remember how a company was recognised, so the next file matches at once. A ticker is only
+    filled in when the row has none (it never overwrites one), and an alias is added once."""
+    await db.execute(
+        """
+        UPDATE entities
+        SET ticker = COALESCE(ticker, $2),
+            domain = COALESCE(domain, $4),
+            aliases = CASE
+                WHEN $3::text IS NULL OR $3 = ANY(aliases) OR lower($3) = lower(name) THEN aliases
+                ELSE array_append(aliases, $3)
+            END
+        WHERE id = $1
+        """,
+        entity_id,
+        ticker,
+        alias,
+        domain,
+    )
+
+
+async def document_text_start(db: Db, document_id: UUID, max_chars: int) -> str:
+    """The first words of a parsed document: its blocks in reading order, up to `max_chars`."""
+    rows = await db.fetch(
+        "SELECT text FROM document_blocks WHERE document_id = $1 ORDER BY seq LIMIT 60",
+        document_id,
+    )
+    parts: list[str] = []
+    used = 0
+    for row in rows:
+        text = str(row["text"]).strip()
+        if not text:
+            continue
+        parts.append(text[: max_chars - used])
+        used += len(parts[-1]) + 2
+        if used >= max_chars:
+            break
+    return "\n\n".join(parts)
+
+
+async def update_entity_details(
+    db: Db,
+    workspace_id: UUID,
+    entity_id: UUID,
+    *,
+    ticker: str | None,
+    domain: str | None,
+    set_ticker: bool,
+    set_domain: bool,
+) -> EntityRecord | None:
+    """Set or clear a company's ticker and/or website domain (a field not asked for is left alone).
+    None if there is no such row in this workspace. A ticker already used by another row is the
+    caller's to refuse before this (intake matches companies by ticker)."""
+    row = await db.fetchrow(
+        """
+        UPDATE entities
+        SET ticker = CASE WHEN $4 THEN $3 ELSE ticker END,
+            domain = CASE WHEN $6 THEN $5 ELSE domain END
+        WHERE id = $1 AND workspace_id = $2
+        RETURNING id, workspace_id, name, position, created_at, ticker, aliases, domain
+        """,
+        entity_id,
+        workspace_id,
+        ticker,
+        set_ticker,
+        domain,
+        set_domain,
+    )
+    return EntityRecord(**dict(row)) if row else None
+
+
+async def ticker_in_use(
+    db: Db, workspace_id: UUID, ticker: str, except_entity: UUID
+) -> str | None:
+    """The name of ANOTHER row that already has this ticker, or None."""
+    return await db.fetchval(  # type: ignore[no-any-return]
+        "SELECT name FROM entities WHERE workspace_id = $1 AND ticker = $2 AND id <> $3 LIMIT 1",
+        workspace_id,
+        ticker,
+        except_entity,
+    )

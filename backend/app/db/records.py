@@ -5,11 +5,13 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["streaming", "complete", "stopped", "error"]
-TraceKind = Literal["chat", "summary", "classify", "extract", "plan", "embed"]
+TraceKind = Literal[
+    "chat", "summary", "classify", "extract", "plan", "embed", "agent", "intake"
+]
 CostSource = Literal["provider", "computed", "unknown"]
 TraceStatus = Literal["ok", "error", "rejected", "cancelled"]
 DocumentStatus = Literal[
@@ -34,6 +36,9 @@ class EntityRecord(BaseModel):
     name: str
     position: int
     created_at: datetime
+    ticker: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    domain: str | None = None  # the company's website, for its logo
 
 
 class ConversationRecord(BaseModel):
