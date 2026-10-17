@@ -31,6 +31,7 @@ from backend.app.chunking.expand import ParentView, expand_to_parents
 from backend.app.config import Settings
 from backend.app.db import repository as repo
 from backend.app.db.records import ChunkHit, ChunkRecord, TraceRecord
+from backend.app.finance.periods import grounded_period
 from backend.app.llm_cache import LlmCache
 from backend.app.matrix.models import (
     CellOutcome,
@@ -535,10 +536,14 @@ class CellExtractor:
                 if exc.code == "bad_output" and attempt == 1:
                     problem, unusable = "the reply was not a valid JSON object.", True
                     continue
-                return CellOutcome(
-                    status="pending_or_error",
-                    detail=f"the model call failed ({exc.code})",
+                # A reply that arrived but could not be read is usually one cut off at the token
+                # limit: say that, not "the call failed", so a person knows a retry may help.
+                detail = (
+                    "the model's reply was cut off or not valid JSON, twice: try again"
+                    if exc.code == "bad_output"
+                    else f"the model call failed ({exc.code})"
                 )
+                return CellOutcome(status="pending_or_error", detail=detail)
             try:
                 reply = ModelReply.model_validate(raw)
             except ValidationError as exc:
@@ -554,6 +559,10 @@ class CellExtractor:
                 final_attempt=attempt == 2,
             )
             if decision.outcome is not None:
+                if decision.outcome.status in ("answered", "low_confidence"):
+                    shown = "\n".join(c.chunk.text for c in context)
+                    found = grounded_period(reply.period, shown)
+                    decision.outcome.period = found.label if found else None
                 if decision.outcome.status == "not_found":
                     decision.outcome.retry_wider = (
                         True  # the model looked and found nothing

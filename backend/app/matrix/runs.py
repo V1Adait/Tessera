@@ -234,7 +234,9 @@ class RunManager:
         if await repo.get_workspace(self._pool, workspace_id) is None:
             raise repo.WorkspaceNotFoundError(str(workspace_id))
         entities = [e.id for e in await repo.list_entities(self._pool, workspace_id)]
-        columns = [c.id for c in await mrepo.list_columns(self._pool, workspace_id)]
+        column_records = await mrepo.list_columns(self._pool, workspace_id)
+        columns = [c.id for c in column_records]
+        computed_ids = {c.id for c in column_records if c.derivation is not None}
         for label, wanted, known in (
             ("rows", scope.entity_ids, entities),
             ("columns", scope.column_ids, columns),
@@ -250,15 +252,17 @@ class RunManager:
         cols = [i for i in columns if wanted_cols is None or i in wanted_cols]
         states = await rrepo.cell_states(self._pool, workspace_id)
         cells, pinned = choose_cells(rows, cols, states, scope)
-        estimate = await estimate_cost(self._pool, self._settings, len(cells))
+        # A computed cell is arithmetic, not a model call: it costs nothing and is not counted.
+        paid = sum(1 for c in cells if c.column_id not in computed_ids)
+        estimate = await estimate_cost(self._pool, self._settings, paid)
 
         reasons: list[str] = []
         if estimate.expected_usd is None:
             reasons.append("its cost cannot be estimated")
         elif estimate.expected_usd > self._settings.run_confirm_above_usd:
             reasons.append(f"it is estimated at about ${estimate.expected_usd:.4f}")
-        if len(cells) > self._settings.run_confirm_above_cells:
-            reasons.append(f"it fills {len(cells)} cells")
+        if paid > self._settings.run_confirm_above_cells:
+            reasons.append(f"it fills {paid} cells")
         warnings: list[str] = []
         if estimate.expected_usd is not None and estimate.expected_usd > cap:
             warnings.append(
@@ -367,8 +371,20 @@ class RunManager:
         status: str = "failed"
         detail: str | None = "the run broke before it could finish"
         try:
+            # Cells read from documents first; computed cells (arithmetic on those) after, so they
+            # find their inputs. A final refresh makes every row consistent whatever the order was.
+            columns = await mrepo.list_columns(self._pool, record.workspace_id)
+            computed_ids = {c.id for c in columns if c.derivation is not None}
+            first = [c for c in plan.cells if c.column_id not in computed_ids]
+            after = [c for c in plan.cells if c.column_id in computed_ids]
             await asyncio.gather(
-                *[self._one(record, cell, semaphore, live) for cell in plan.cells]
+                *[self._one(record, cell, semaphore, live) for cell in first]
+            )
+            await asyncio.gather(
+                *[self._one(record, cell, semaphore, live) for cell in after]
+            )
+            await self._service.refresh_rows(
+                record.workspace_id, {c.entity_id for c in plan.cells}
             )
             if live.stop.is_set() and live.skipped:
                 status, detail = (

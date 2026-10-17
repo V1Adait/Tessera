@@ -142,7 +142,7 @@ async def test_a_cell_is_answered_with_a_verified_quote_and_stored_with_its_evid
     assert cell.value == {"number": "166000", "unit": None}
     assert cell.display_value == "166,000"
     assert cell.column_version == 1 and not cell.stale and not cell.pinned
-    assert (cell.model, cell.prompt_version) == ("scripted", "extract-1")
+    assert (cell.model, cell.prompt_version) == ("scripted", "extract-2")
     [ev] = cell.evidence
     assert ev.quote == QUOTE and ev.document_id == doc.id and ev.chunk_id is not None
 
@@ -202,7 +202,7 @@ async def test_every_model_call_is_traced(world):
         "select kind, status, model, prompt_version, tokens_in from traces where kind = 'extract'"
     )
     assert row["status"] == "ok" and row["model"] == "scripted"
-    assert row["prompt_version"] == "extract-1" and row["tokens_in"] == 50
+    assert row["prompt_version"] == "extract-2" and row["tokens_in"] == 50
 
 
 # --- the model's claim does not hold up -------------------------------------------------------

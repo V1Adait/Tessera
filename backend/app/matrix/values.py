@@ -46,6 +46,12 @@ _SCALE_WORDS = {
     "billion": ("billions", Decimal(10) ** 9),
     "billions": ("billions", Decimal(10) ** 9),
     "bn": ("billions", Decimal(10) ** 9),
+    # a single letter stuck to the number: "$1.2B", "$500M", "$3K", "$2.1T", "$450MM"
+    "b": ("billions", Decimal(10) ** 9),
+    "mm": ("millions", Decimal(10) ** 6),
+    "m": ("millions", Decimal(10) ** 6),
+    "k": ("thousands", Decimal(10) ** 3),
+    "t": ("trillions", Decimal(10) ** 12),
     "trillion": ("trillions", Decimal(10) ** 12),
     "trillions": ("trillions", Decimal(10) ** 12),
 }
@@ -61,6 +67,8 @@ _NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
 _SCALE_AFTER = re.compile(
     r"\s*\(?\s*(thousands?|millions?|billions?|trillions?|mn|bn)\b", re.IGNORECASE
 )
+# Only when the letter is attached to the number ("$1.2B"): "5 M" or "2 T" with a space is ambiguous.
+_SCALE_SUFFIX = re.compile(r"(mm|[bmkt])\b", re.IGNORECASE)
 _MONTHS = {
     name: number
     for number, names in enumerate(
@@ -155,7 +163,7 @@ def _read_figure(answer: str) -> _Figure:
     percent = after.lstrip(") ").startswith("%")
 
     scale_name, factor = None, Decimal(1)
-    scale = _SCALE_AFTER.match(after)
+    scale = _SCALE_AFTER.match(after) or _SCALE_SUFFIX.match(after)
     if scale and not percent:
         scale_name, factor = _SCALE_WORDS[scale.group(1).lower()]
 
@@ -351,6 +359,12 @@ def normalise(
 # --- is the value in the quote? ---------------------------------------------------------------
 
 
+def _factor_after(text: str) -> Decimal:
+    """The scale a figure carries in the text that follows its digits: 1 if it has none."""
+    scale = _SCALE_AFTER.match(text) or _SCALE_SUFFIX.match(text)
+    return _SCALE_WORDS[scale.group(1).lower()][1] if scale else Decimal(1)
+
+
 def supported_by_quote(
     column_type: ColumnType, answer: str, quotes: list[str]
 ) -> str | None:
@@ -361,10 +375,26 @@ def supported_by_quote(
     a yes/no, a choice or free text is a judgement, not a transcription)."""
     joined = " ".join(quotes)
     if column_type in ("number", "currency"):
-        token = _read_figure(answer).token
+        figure = _read_figure(answer)
+        token = figure.token
         stripped = joined.replace(",", "")
-        if not re.search(rf"(?<![\d.]){re.escape(token)}(?!\d|\.\d)", stripped):
+        found = list(re.finditer(rf"(?<![\d.]){re.escape(token)}(?!\d|\.\d)", stripped))
+        if not found:
             return f"the number {token} does not appear in the quoted text: answer with a number the quote states, do not calculate"
+        # The quote may print the figure with a scale ("$1.2B"). An answer that drops it ("$1.2")
+        # would be wrong by a factor of a billion, so it must carry the same scale.
+        if not any(
+            _factor_after(stripped[m.end() :]) in (Decimal(1), figure.scale_factor)
+            for m in found
+        ):
+            tail = _SCALE_AFTER.match(
+                stripped[found[0].end() :]
+            ) or _SCALE_SUFFIX.match(stripped[found[0].end() :])
+            shown = tail.group(1) if tail else "a scale"
+            return (
+                f"the quote prints {token} with a scale ('{shown}') that the answer leaves out: "
+                f"write the amount as printed, with its scale"
+            )
         return None
     if column_type == "date":
         parsed = normalise_date(answer).value

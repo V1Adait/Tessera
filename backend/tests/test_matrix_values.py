@@ -284,12 +284,11 @@ def test_judgement_types_have_no_digit_check(column_type):
 
 
 def test_any_one_of_several_quotes_may_hold_the_number():
-    assert (
-        supported_by_quote(
-            "number", "402", ["bought back shares", "402 million shares"]
-        )
-        is None
-    )
+    quotes = ["bought back shares", "402 million shares"]
+
+    assert supported_by_quote("number", "402 million", quotes) is None
+    # "402" alone would be wrong by a factor of a million: the scale the quote prints must be kept
+    assert "leaves out" in (supported_by_quote("number", "402", quotes) or "")
 
 
 # --- column definitions -----------------------------------------------------------------------
@@ -370,3 +369,75 @@ def test_a_units_header_that_mentions_per_share_amounts_is_not_a_per_share_cue()
 
 def test_per_share_wording_outside_the_units_header_still_counts():
     assert is_per_unit("(In millions) Dividends per share")
+
+
+# --- a scale letter stuck to the number: "$1.2B" must never become $1.2 ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("answer", "amount", "scale", "shown"),
+    [
+        ("$1.2B", "1200000000", "billions", "$1.2 billion"),
+        ("$1.2b", "1200000000", "billions", "$1.2 billion"),
+        ("$500M", "500000000", "millions", "$500 million"),
+        ("$450MM", "450000000", "millions", "$450 million"),
+        ("$3K", "3000", "thousands", "$3 thousand"),
+        ("$2.1T", "2100000000000", "trillions", "$2.1 trillion"),
+        ("$1.2bn", "1200000000", "billions", "$1.2 billion"),
+        ("$1.2 billion", "1200000000", "billions", "$1.2 billion"),
+    ],
+)
+def test_a_scale_letter_attached_to_the_number_is_understood(
+    answer, amount, scale, shown
+):
+    result = normalise_currency(answer, None)
+
+    assert result.value["amount"] == amount and result.value["scale"] == scale
+    assert result.display == shown
+
+
+def test_a_scale_letter_on_a_plain_number():
+    assert normalise_number("5M users").value == {"number": "5000000", "unit": None}
+
+
+def test_a_letter_that_is_not_a_scale_does_not_scale_anything():
+    assert normalise_currency("$1.2X", None).value["amount"] == "1.2"
+    assert (
+        normalise_currency("$1.2 B", None).value["amount"] == "1.2"
+    )  # a space makes it ambiguous
+    assert normalise_number("62%").value == {"number": "62", "unit": "%"}
+
+
+@pytest.mark.parametrize("column_type", ["currency", "number"])
+def test_an_answer_that_drops_the_scale_the_quote_prints_is_refused(column_type):
+    problem = supported_by_quote(
+        column_type,
+        "$1.2",
+        ["Q2 2026 adjusted operating income was $1.2B, representing 62%."],
+    )
+
+    assert problem is not None and "leaves out" in problem and "'B'" in problem
+
+
+@pytest.mark.parametrize("answer", ["$1.2B", "$1.2 billion", "$1.2bn"])
+def test_an_answer_that_keeps_the_scale_is_accepted(answer):
+    assert (
+        supported_by_quote("currency", answer, ["income was $1.2B, a margin of 62%"])
+        is None
+    )
+
+
+def test_a_quote_with_no_scale_does_not_forbid_a_scaled_answer():
+    """A table row '1,200' under an 'in millions' heading: the answer may say $1,200 million."""
+    assert (
+        supported_by_quote("currency", "$1,200 million", ["Revenue | 1,200 | 1,100"])
+        is None
+    )
+
+
+def test_the_same_figure_in_two_quotes_is_fine_if_one_agrees():
+    quotes = ["a $5 deposit was made", "total of $5B in assets"]
+
+    assert (
+        supported_by_quote("currency", "$5", quotes) is None
+    )  # the first quote prints $5 with no scale

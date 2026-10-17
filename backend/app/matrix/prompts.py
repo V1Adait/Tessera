@@ -4,7 +4,7 @@ Bump the version when the wording changes: it is stored with every cell and ever
 
 from backend.app.matrix.models import ColumnRecord
 
-EXTRACT_PROMPT_VERSION = "extract-1"
+EXTRACT_PROMPT_VERSION = "extract-2"
 
 # the tags we use to fence data; user and document text is stopped from closing them
 DATA_TAGS = ("task", "documents", "chunk", "problem", "column", "question", "company")
@@ -25,6 +25,9 @@ the answer: one sentence, or one table row including its label.
 If the answer would need a calculation, reply not_found.
 - Tables: a row looks like "Label | value | value". The first row of the chunk names the columns, \
 and the units (such as "in millions") are stated near the table. Check which column a value belongs to.
+- Period: if the cited text states which period the figure covers, give it in "period" as FY2025 (a \
+fiscal year), Q2 2026 (a quarter) or H1 2026 (a half), using the year the company itself calls it. If the \
+text does not say, use null. Never guess a period.
 - If the question does not apply to this company at all, reply "not_applicable" with a one-sentence reason.
 - If it applies but the documents do not say, reply "not_found" with a one-sentence reason. Do not guess.
 - If two passages give different answers, reply "conflicting" and quote both.
@@ -33,6 +36,7 @@ Reply with a JSON object only, no other text:
 {"status": "answered" | "not_found" | "not_applicable" | "conflicting",
  "answer": "<the answer, or null>",
  "reason": "<one sentence, or null>",
+ "period": "<FY2025 | Q2 2026 | H1 2026, or null>",
  "evidence": [{"chunk": "C1", "quote": "<exact words>"}]}"""
 
 

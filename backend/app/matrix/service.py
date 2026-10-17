@@ -15,10 +15,13 @@ import asyncpg
 from backend.app.config import Settings
 from backend.app.db import matrix_repository as mrepo
 from backend.app.db import repository as repo
+from backend.app.db import runs_repository as rrepo
 from backend.app.db.records import ChunkHit
 from backend.app.embeddings.indexer import Indexer
+from backend.app.finance.checks import CheckSpec
 from backend.app.llm import get_llm
 from backend.app.llm_cache import PgLlmCache
+from backend.app.matrix import computed
 from backend.app.matrix.extractor import CellExtractor, Retriever
 from backend.app.matrix.models import (
     CellOutcome,
@@ -27,6 +30,7 @@ from backend.app.matrix.models import (
     ColumnPatch,
     ColumnRecord,
 )
+from backend.app.packs.loader import get_check_specs
 from backend.app.retrieval.terms import or_query
 from backend.app.tracing import Recorder, db_recorder
 
@@ -47,13 +51,23 @@ class EntityNotFoundError(LookupError):
     """No such row in this workspace."""
 
 
+class ColumnBusyError(Exception):
+    """The column cannot be removed right now. The message says why, in words for a person."""
+
+
 class MatrixService:
     def __init__(
-        self, pool: asyncpg.Pool, settings: Settings, extractor: CellExtractor
+        self,
+        pool: asyncpg.Pool,
+        settings: Settings,
+        extractor: CellExtractor,
+        check_specs: list[CheckSpec] | None = None,
     ) -> None:
         self._pool = pool
         self._settings = settings
         self._extractor = extractor
+        # the tie-outs to run on a row's cells; the shipped packs' checks unless a test passes its own
+        self._checks = get_check_specs() if check_specs is None else check_specs
 
     # --- columns ---------------------------------------------------------------------------
 
@@ -121,6 +135,24 @@ class MatrixService:
                 str(existing.id)
             )  # before any model call is paid for
 
+        if column.derivation is not None:
+            # Computed in code from other cells: no model, no cost.
+            columns = await mrepo.list_columns(self._pool, workspace_id)
+            cell = await computed.compute_cell(
+                self._pool,
+                workspace_id,
+                entity_id,
+                column,
+                columns,
+                replace_pinned=replace_pinned,
+            )
+            return Filled(
+                cell=await self._after_change(workspace_id, entity_id, cell),
+                cost_usd=Decimal(0),
+                unknown_cost_calls=0,
+                model_calls=0,
+            )
+
         entity_name = await repo.entity_name(self._pool, entity_id) or "the company"
         outcome = await self._extractor.extract(
             workspace_id, entity_id, entity_name, column, refresh=refresh
@@ -133,12 +165,60 @@ class MatrixService:
             outcome=outcome,
             replace_pinned=replace_pinned,
         )
+        cell = await self._after_change(workspace_id, entity_id, cell)
         return Filled(
             cell=cell,
             cost_usd=outcome.cost_usd,
             unknown_cost_calls=outcome.unknown_cost_calls,
             model_calls=outcome.model_calls,
         )
+
+    async def delete_column(self, workspace_id: UUID, column_id: UUID) -> None:
+        """Remove a column with all its cells. This cannot be undone, so the person has confirmed it
+        before this is called (the screen asks; the agent stores it as a pending action).
+
+        Raises ColumnNotFoundError, or ColumnBusyError when a fill is going (it would write cells
+        into a column that is being removed) or when computed columns are built on this one."""
+        column = await self._column_in(workspace_id, column_id)
+        if await rrepo.running_run(self._pool, workspace_id) is not None:
+            raise ColumnBusyError(
+                "A fill is going in this workspace. Stop it, or wait, before removing a column."
+            )
+        users = await mrepo.columns_depending_on(self._pool, workspace_id, column_id)
+        if users:
+            raise ColumnBusyError(
+                f"{', '.join(users)} {'is' if len(users) == 1 else 'are'} computed from "
+                f"'{column.name}'. Remove or change {'it' if len(users) == 1 else 'them'} first."
+            )
+        await mrepo.delete_column(self._pool, workspace_id, column_id)
+        # tie-outs that named this column no longer apply: bring every row up to date
+        entities = await repo.list_entities(self._pool, workspace_id)
+        await self.refresh_rows(workspace_id, {e.id for e in entities})
+
+    async def refresh_row(self, workspace_id: UUID, entity_id: UUID) -> None:
+        """Bring a row's computed cells and tie-outs up to date with its other cells."""
+        await computed.refresh_row(self._pool, workspace_id, entity_id, self._checks)
+
+    async def refresh_rows(self, workspace_id: UUID, entity_ids: set[UUID]) -> None:
+        """Refresh several rows. One row failing is logged, not allowed to stop the others."""
+        for entity_id in entity_ids:
+            try:
+                await self.refresh_row(workspace_id, entity_id)
+            except Exception:
+                logger.exception("could not refresh a row's computed cells")
+
+    async def _after_change(
+        self, workspace_id: UUID, entity_id: UUID, cell: CellRecord
+    ) -> CellRecord:
+        """A cell of this row changed: refresh the computed cells and tie-outs, and return the cell
+        as it is now. The refresh never fails a fill: it is derived data, recomputed next time."""
+        try:
+            await self.refresh_row(workspace_id, entity_id)
+            fresh = await mrepo.get_cell(self._pool, cell.id)
+            return fresh if fresh is not None else cell
+        except Exception:
+            logger.exception("could not refresh a row's computed cells")
+            return cell
 
     async def record_failure(
         self, workspace_id: UUID, entity_id: UUID, column_id: UUID, detail: str

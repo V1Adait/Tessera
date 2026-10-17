@@ -1,8 +1,8 @@
 """HTTP routes for the matrix: columns and cells. Thin handlers: the work is in matrix/service.py.
 
-What these routes deliberately do NOT do yet: delete a column, hand-edit a cell, or fill many
-cells at once. Deleting and overwriting a person's work need the confirmation flow of the chat
-agent; filling many cells needs the cost estimate and the background runner.
+What these routes deliberately do NOT do: hand-edit a cell, or fill many cells at once (that is
+the runner, with its cost estimate). Deleting a column is here, but the SCREEN asks for the yes
+first: the route itself refuses while a fill is going or while computed columns are built on it.
 """
 
 from typing import Annotated
@@ -19,7 +19,11 @@ from backend.app.matrix.models import (
     ColumnRecord,
     ExtractRequest,
 )
-from backend.app.matrix.service import EntityNotFoundError, MatrixService
+from backend.app.matrix.service import (
+    ColumnBusyError,
+    EntityNotFoundError,
+    MatrixService,
+)
 
 router = APIRouter(tags=["matrix"])
 
@@ -136,3 +140,20 @@ async def get_cell(workspace_id: UUID, cell_id: UUID, service: MatrixDep) -> Cel
     if cell is None:
         raise _not_found("cell")
     return cell
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/columns/{column_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_column(
+    workspace_id: UUID, column_id: UUID, service: MatrixDep
+) -> None:
+    """Remove a column and its cells. 409 (with the reason) while a fill is going or while computed
+    columns are built on it. Cannot be undone."""
+    try:
+        await service.delete_column(workspace_id, column_id)
+    except mrepo.ColumnNotFoundError:
+        raise _not_found("column") from None
+    except ColumnBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None

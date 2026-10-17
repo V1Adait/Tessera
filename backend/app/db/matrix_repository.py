@@ -46,13 +46,16 @@ def _name_key(name: str) -> str:
 
 
 def _column(row: asyncpg.Record) -> ColumnRecord:
-    return ColumnRecord(**dict(row))
+    data = dict(row)
+    raw = data.get("derivation")
+    data["derivation"] = json.loads(raw) if isinstance(raw, str) else raw
+    return ColumnRecord(**data)
 
 
 _COLUMN_SELECT = """
     SELECT c.id, c.workspace_id, c.position, c.current_version AS version,
            v.name, v.prompt, v.type, v.allowed_values, v.applicability, v.evidence_required,
-           v.depends_on, c.created_at, c.updated_at
+           v.depends_on, v.derivation, c.created_at, c.updated_at
     FROM matrix_columns c
     JOIN column_versions v ON v.column_id = c.id AND v.version = c.current_version
 """
@@ -79,8 +82,8 @@ async def _insert_version(
     await conn.execute(
         """
         INSERT INTO column_versions (column_id, version, name, prompt, type, allowed_values,
-                                     applicability, evidence_required, depends_on)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                                     applicability, evidence_required, depends_on, derivation)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
         """,
         column_id,
         version,
@@ -91,6 +94,7 @@ async def _insert_version(
         draft.applicability,
         draft.evidence_required,
         draft.depends_on,
+        json.dumps(draft.derivation.stored()) if draft.derivation else None,
     )
 
 
@@ -142,6 +146,7 @@ def apply_patch(current: ColumnRecord, patch: ColumnPatch) -> ColumnDraft:
         "applicability": current.applicability,
         "evidence_required": current.evidence_required,
         "depends_on": current.depends_on,
+        "derivation": current.derivation,  # a patch never changes how a column is computed
     }
     for key, value in changes.items():
         if value is not None:
@@ -182,6 +187,7 @@ async def update_column(
             applicability=current.applicability,
             evidence_required=current.evidence_required,
             depends_on=current.depends_on,
+            derivation=current.derivation,
         )
         if unchanged:
             return current
@@ -214,7 +220,8 @@ async def update_column(
 
 _CELL_COLUMNS = """
     id, workspace_id, entity_id, column_id, column_version, status, status_detail, value,
-    display_value, as_of, derivation, stale, pinned, model, prompt_version, created_at, updated_at
+    display_value, as_of, derivation, stale, pinned, model, prompt_version, created_at, updated_at,
+    period, checks
 """
 
 
@@ -249,6 +256,7 @@ async def _attach(db: Db, rows: list[asyncpg.Record]) -> list[CellRecord]:
         data = dict(r)
         data["value"] = _json_value(data["value"])
         data["derivation"] = _json_value(data["derivation"])
+        data["checks"] = _json_value(data["checks"]) or []
         cells.append(CellRecord(**data, evidence=by_cell.get(r["id"], [])))
     return cells
 
@@ -320,12 +328,17 @@ async def save_cell(
         if existing is not None and existing["pinned"] and not replace_pinned:
             raise CellPinnedError(str(existing["id"]))
         value = json.dumps(outcome.value) if outcome.value is not None else None
+        derivation = (
+            json.dumps(outcome.derivation) if outcome.derivation is not None else None
+        )
         if existing is None:
             cell_id = await conn.fetchval(
                 """
                 INSERT INTO cells (workspace_id, entity_id, column_id, column_version, status,
-                                   status_detail, value, display_value, model, prompt_version)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10) RETURNING id
+                                   status_detail, value, display_value, model, prompt_version,
+                                   period, derivation)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12::jsonb)
+                RETURNING id
                 """,
                 workspace_id,
                 entity_id,
@@ -337,6 +350,8 @@ async def save_cell(
                 outcome.display,
                 outcome.model,
                 outcome.prompt_version,
+                outcome.period,
+                derivation,
             )
         else:
             cell_id = existing["id"]
@@ -345,6 +360,7 @@ async def save_cell(
                 """
                 UPDATE cells SET column_version = $2, status = $3, status_detail = $4,
                        value = $5::jsonb, display_value = $6, model = $7, prompt_version = $8,
+                       period = $9, derivation = $10::jsonb, checks = '[]'::jsonb,
                        stale = false, pinned = false, updated_at = now()
                 WHERE id = $1
                 """,
@@ -356,6 +372,8 @@ async def save_cell(
                 outcome.display,
                 outcome.model,
                 outcome.prompt_version,
+                outcome.period,
+                derivation,
             )
         await conn.executemany(
             """
@@ -390,3 +408,60 @@ async def set_pinned(db: Db, cell_id: UUID, pinned: bool) -> bool:
         "UPDATE cells SET pinned = $2 WHERE id = $1", cell_id, pinned
     )
     return result == "UPDATE 1"
+
+
+async def delete_column(db: Db, workspace_id: UUID, column_id: UUID) -> bool:
+    """Remove a column with its versions and cells (foreign key cascade). False if not found."""
+    result = await db.execute(
+        "DELETE FROM matrix_columns WHERE id = $1 AND workspace_id = $2",
+        column_id,
+        workspace_id,
+    )
+    return result == "DELETE 1"
+
+
+async def count_cells(
+    db: Db,
+    workspace_id: UUID,
+    *,
+    entity_id: UUID | None = None,
+    column_id: UUID | None = None,
+) -> tuple[int, int]:
+    """(cells, answered cells) in a row or a column: what a removal would throw away."""
+    row = await db.fetchrow(
+        """
+        SELECT count(*) AS total, count(*) FILTER (WHERE status = 'answered') AS answered
+        FROM cells
+        WHERE workspace_id = $1 AND ($2::uuid IS NULL OR entity_id = $2)
+          AND ($3::uuid IS NULL OR column_id = $3)
+        """,
+        workspace_id,
+        entity_id,
+        column_id,
+    )
+    assert row is not None
+    return int(row["total"]), int(row["answered"])
+
+
+async def columns_depending_on(
+    db: Db, workspace_id: UUID, column_id: UUID
+) -> list[str]:
+    """Names of the columns whose current version lists this column in `depends_on`."""
+    rows = await db.fetch(
+        """
+        SELECT v.name FROM matrix_columns c
+        JOIN column_versions v ON v.column_id = c.id AND v.version = c.current_version
+        WHERE c.workspace_id = $1 AND $2 = ANY(v.depends_on)
+        ORDER BY v.name
+        """,
+        workspace_id,
+        column_id,
+    )
+    return [r["name"] for r in rows]
+
+
+async def set_checks(db: Db, cell_id: UUID, checks: list[dict[str, Any]]) -> None:
+    """Replace the tie-out results shown on a cell (they are recomputed from the row's cells)."""
+    await db.execute(
+        "UPDATE cells SET checks = $2::jsonb WHERE id = $1", cell_id, json.dumps(checks)
+    )

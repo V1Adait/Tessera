@@ -15,6 +15,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from backend.app.finance.derive import Derivation, check_shape
+
 ColumnType = Literal["text", "number", "date", "currency", "select", "yes_no", "status"]
 CellStatus = Literal[
     "answered",
@@ -44,6 +46,9 @@ class ColumnDraft(BaseModel):
     applicability: str | None = Field(default=None, max_length=1000)
     evidence_required: bool = True
     depends_on: list[UUID] = Field(default_factory=list)
+    # Set for a column COMPUTED in code from the columns in `depends_on` (in that order), not read
+    # from documents. Its `prompt` is then only a description for a person.
+    derivation: Derivation | None = None
 
     @field_validator("name", "prompt")
     @classmethod
@@ -77,6 +82,10 @@ class ColumnDraft(BaseModel):
             raise ValueError("a select column needs at least two allowed values")
         if self.type not in ("select", "status") and self.allowed_values:
             raise ValueError("allowed values only apply to select and status columns")
+        if self.derivation is not None:
+            check_shape(self.derivation, len(self.depends_on))
+            if self.type not in ("number", "currency"):
+                raise ValueError("a computed column is a number or an amount")
         return self
 
 
@@ -110,6 +119,7 @@ class ColumnRecord(BaseModel):
     depends_on: list[UUID]
     created_at: datetime
     updated_at: datetime
+    derivation: Derivation | None = None  # set for a computed column
 
 
 # --- what the model may say -------------------------------------------------------------------
@@ -128,6 +138,9 @@ class ModelReply(BaseModel):
     status: Literal["answered", "not_found", "not_applicable", "conflicting"]
     answer: str | None = Field(default=None, max_length=2000)
     reason: str | None = Field(default=None, max_length=500)
+    # The period the model says the figure covers. Only a claim: code parses it and checks the
+    # year really appears in the text it was shown (see finance.periods), else it is dropped.
+    period: str | None = Field(default=None, max_length=60)
     evidence: list[ProposedEvidence] = Field(
         default_factory=list, max_length=MAX_EVIDENCE
     )
@@ -174,6 +187,12 @@ class CellOutcome(BaseModel):
     evidence: list[VerifiedEvidence] = Field(default_factory=list)
     model: str | None = None
     prompt_version: str | None = None
+    period: str | None = (
+        None  # the reporting period the figure covers: "FY2025", "Q2 2026"
+    )
+    derivation: dict[str, Any] | None = (
+        None  # for a computed cell: what it was computed from
+    )
     # Bookkeeping about HOW the outcome was reached. Not stored with the cell.
     retry_wider: bool = Field(
         default=False, exclude=True
@@ -223,6 +242,9 @@ class CellRecord(BaseModel):
     created_at: datetime
     updated_at: datetime
     evidence: list[EvidenceRecord] = Field(default_factory=list)
+    period: str | None = None
+    # Tie-out results shown on this cell: [{id, name, status, detail}]. See finance/checks.py.
+    checks: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExtractRequest(BaseModel):
