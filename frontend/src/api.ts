@@ -1,3 +1,4 @@
+import { isConversationSummary, type ConversationSummary } from "./historyModel";
 import { parseSseChunk } from "./sse";
 import {
   isConversationView,
@@ -155,4 +156,24 @@ export async function fetchConversation(id: string): Promise<ConversationView> {
     throw new Error("The server sent a conversation in an unexpected shape.");
   }
   return data;
+}
+
+/** The chat history of a workspace, newest first. */
+export async function fetchConversations(workspaceId: string): Promise<ConversationSummary[]> {
+  const response = await fetch(`${API_URL}/workspaces/${workspaceId}/conversations`);
+  if (!response.ok) {
+    throw new ApiError(response.status, `Could not load the history (${response.status}).`);
+  }
+  const data: unknown = await response.json();
+  if (!Array.isArray(data) || !data.every(isConversationSummary)) {
+    throw new Error("The server sent the history in an unexpected shape.");
+  }
+  return data;
+}
+
+/** Delete a conversation and its messages. Cannot be undone: the caller asks first. */
+export async function deleteConversation(id: string): Promise<void> {
+  const response = await fetch(`${API_URL}/conversations/${id}`, { method: "DELETE" });
+  if (response.status === 204) return;
+  throw new ApiError(response.status, `Could not delete the conversation (${response.status}).`);
 }

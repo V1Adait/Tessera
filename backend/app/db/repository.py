@@ -24,6 +24,7 @@ from backend.app.db.records import (
     ChunkHit,
     ChunkRecord,
     ConversationRecord,
+    ConversationSummary,
     DocumentRecord,
     EntityRecord,
     MessageRole,
@@ -151,6 +152,36 @@ async def get_conversation(db: Db, conversation_id: UUID) -> ConversationRecord 
         conversation_id,
     )
     return ConversationRecord(**dict(row)) if row else None
+
+
+async def list_conversations(
+    db: Db, workspace_id: UUID, limit: int = 50
+) -> list[ConversationSummary]:
+    """The workspace's conversations, most recently active first. Only a conversation that has at
+    least one message appears: an empty one is not history."""
+    rows = await db.fetch(
+        """
+        SELECT c.id, c.title, c.updated_at, count(m.id)::int AS message_count
+        FROM conversations c
+        JOIN messages m ON m.conversation_id = c.id
+        WHERE c.workspace_id = $1
+        GROUP BY c.id
+        ORDER BY c.updated_at DESC, c.id
+        LIMIT $2
+        """,
+        workspace_id,
+        limit,
+    )
+    return [ConversationSummary(**dict(r)) for r in rows]
+
+
+async def delete_conversation(db: Db, conversation_id: UUID) -> bool:
+    """Remove a conversation with its messages, summaries and pending actions (foreign key cascade).
+    Its traces stay, for the cost record, but no longer point at it. False if there is none."""
+    result = await db.execute(
+        "DELETE FROM conversations WHERE id = $1", conversation_id
+    )
+    return result == "DELETE 1"
 
 
 # --- messages ---------------------------------------------------------------------------

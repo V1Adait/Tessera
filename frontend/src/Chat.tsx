@@ -1,11 +1,31 @@
-import { ArrowUp, FileText, Loader2, Paperclip, Plus, ShieldAlert, Square, X } from "lucide-react";
+import {
+  ArrowUp,
+  FileText,
+  History,
+  Loader2,
+  PanelLeftClose,
+  Paperclip,
+  Plus,
+  ShieldAlert,
+  Square,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/Markdown";
 import { Select, Textarea } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { ApiError, fetchConversation, streamAnswer, streamChat } from "./api";
+import {
+  ApiError,
+  deleteConversation,
+  fetchConversation,
+  fetchConversations,
+  streamAnswer,
+  streamChat,
+} from "./api";
+import HistoryPanel from "./HistoryPanel";
+import type { ConversationSummary } from "./historyModel";
 import { cancelAction, confirmAction, fetchPendingActions } from "./agentApi";
 import PlanCard from "./PlanCard";
 import { planOfArgs, type PlanPayload } from "./planModel";
@@ -27,7 +47,7 @@ import type { Tone } from "./matrixModel";
 import type { Entity } from "./matrixTypes";
 import { type UiTool } from "./stepsModel";
 import ToolSteps from "./ToolSteps";
-import type { StoredMessage, StreamEvent, Usage } from "./types";
+import type { ConversationView, StoredMessage, StreamEvent, Usage } from "./types";
 
 // What the screen keeps for each message.
 interface UiMessage {
@@ -77,6 +97,9 @@ interface ChatProps {
   workspaceId: string | null; // where attached documents go
   entities: Entity[]; // the rows a document can belong to
   onMatrixChanged: () => void; // the agent changed the grid: reload it
+  onCollapse: () => void; // fold the chat away so the table can use the whole screen
+  onNeedsAttention: () => void; // a yes is needed: the panel must be open to show it
+  onActivity: () => void; // an answer finished: tell a folded panel to show a dot
 }
 
 const STORAGE_KEY = "tessera.conversationId";
@@ -163,10 +186,20 @@ function IntakeLine({
   );
 }
 
-export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatProps) {
+export default function Chat({
+  workspaceId,
+  entities,
+  onMatrixChanged,
+  onCollapse,
+  onNeedsAttention,
+  onActivity,
+}: ChatProps) {
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversationWorkspace, setConversationWorkspace] = useState<string | null>(null);
+  const [history, setHistory] = useState<ConversationSummary[] | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [cards, setCards] = useState<Card[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -179,6 +212,28 @@ export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatPro
   const latest = useRef<Attachment[]>([]); // what the poll reads, so it never needs a state updater
   const [targetRow, setTargetRow] = useState(""); // "" = not tied to a row yet
 
+  // Show a stored conversation: its messages, and anything in it still waiting for a yes.
+  function applyConversation(conversation: ConversationView, isCancelled: () => boolean = () => false): void {
+    setConversationId(conversation.id);
+    setConversationWorkspace(conversation.workspace_id ?? null);
+    setMessages(conversation.messages.map(toUiMessage));
+    setCards([]);
+    fetchPendingActions(conversation.id)
+      .then((found) => {
+        if (isCancelled()) return;
+        setCards(
+          found.map((a) => ({
+            id: a.id,
+            risk: a.risk,
+            summary: a.summary,
+            plan: planOfArgs(a.args),
+            state: "waiting",
+          })),
+        );
+      })
+      .catch(() => undefined);
+  }
+
   // On first load: bring back the conversation we were in, if the server still has it.
   useEffect(() => {
     const storedId = readStoredId();
@@ -186,25 +241,7 @@ export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatPro
     let cancelled = false;
     fetchConversation(storedId)
       .then((conversation) => {
-        if (cancelled) return;
-        setConversationId(conversation.id);
-        setConversationWorkspace(conversation.workspace_id ?? null);
-        setMessages(conversation.messages.map(toUiMessage));
-        // Anything still waiting for a yes comes back as a card.
-        fetchPendingActions(conversation.id)
-          .then((found) => {
-            if (cancelled) return;
-            setCards(
-              found.map((a) => ({
-                id: a.id,
-                risk: a.risk,
-                summary: a.summary,
-                plan: planOfArgs(a.args),
-                state: "waiting",
-              })),
-            );
-          })
-          .catch(() => undefined);
+        if (!cancelled) applyConversation(conversation, () => cancelled);
       })
       .catch(() => {
         if (!cancelled) writeStoredId(null); // gone or unreachable: start fresh
@@ -215,7 +252,55 @@ export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatPro
     return () => {
       cancelled = true;
     };
+    // applyConversation only calls state setters, which never change: running this once is correct
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // --- the history of earlier chats ---------------------------------------------------------------
+
+  async function loadHistory(): Promise<void> {
+    if (workspaceId === null) return;
+    setHistoryError(null);
+    try {
+      setHistory(await fetchConversations(workspaceId));
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : "Could not load the history.");
+    }
+  }
+
+  function toggleHistory(): void {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next) {
+      setHistory(null); // shows "Loading…" until the fresh list arrives
+      void loadHistory();
+    }
+  }
+
+  async function openConversation(id: string): Promise<void> {
+    if (busy) return;
+    setRestoring(true);
+    setHistoryError(null);
+    try {
+      applyConversation(await fetchConversation(id));
+      writeStoredId(id);
+      setHistoryOpen(false);
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : "Could not open that chat.");
+    } finally {
+      setRestoring(false);
+    }
+  }
+
+  async function removeConversation(id: string): Promise<void> {
+    try {
+      await deleteConversation(id);
+      setHistory((prev) => (prev === null ? prev : prev.filter((c) => c.id !== id)));
+      if (id === conversationId) newChat(); // the open chat was deleted: start a fresh one
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : "Could not delete that chat.");
+    }
+  }
 
   // Keep the newest text in view while the answer streams in.
   useEffect(() => {
@@ -323,6 +408,7 @@ export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatPro
           requestId: event.request_id,
           warnings: event.warnings,
         }));
+        onActivity();
         break;
       case "tool": {
         const step: UiTool = {
@@ -341,6 +427,7 @@ export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatPro
         break;
       }
       case "confirmation":
+        onNeedsAttention(); // a yes is needed: never leave it hidden behind a folded panel
         setCards((prev) => [
           ...prev,
           {
@@ -443,6 +530,7 @@ export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatPro
     setMessages([]);
     setCards([]);
     forgetConversation();
+    setHistoryOpen(false);
   }
 
   function setCard(id: string, change: Partial<Card>): void {
@@ -526,12 +614,43 @@ export default function Chat({ workspaceId, entities, onMatrixChanged }: ChatPro
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-muted/50 text-foreground">
-      <header className="flex items-center justify-between border-b px-4 py-3">
+      <header className="flex items-center justify-between gap-1 border-b px-3 py-2.5">
         <h1 className="text-base font-semibold">Tessera</h1>
-        <Button variant="ghost" size="sm" onClick={newChat} disabled={busy || restoring}>
-          <Plus className="size-4" /> New chat
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant={historyOpen ? "outline" : "ghost"}
+            size="sm"
+            onClick={toggleHistory}
+            disabled={workspaceId === null}
+            aria-pressed={historyOpen}
+            title="Earlier chats in this workspace"
+          >
+            <History className="size-4" /> History
+          </Button>
+          <Button variant="ghost" size="sm" onClick={newChat} disabled={busy || restoring}>
+            <Plus className="size-4" /> New chat
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onCollapse}
+            aria-label="Fold the chat away"
+            title="Fold the chat away so the table can use the whole screen (Ctrl+\)"
+          >
+            <PanelLeftClose className="size-4" />
+          </Button>
+        </div>
       </header>
+      {historyOpen && (
+        <HistoryPanel
+          items={history}
+          activeId={conversationId}
+          error={historyError}
+          disabled={busy || restoring}
+          onOpen={(id) => void openConversation(id)}
+          onDelete={(id) => void removeConversation(id)}
+        />
+      )}
 
       <main className="flex-1 overflow-y-auto px-4 py-4">
         {restoring && <p className="mt-10 text-center text-sm text-muted-foreground">Loading your conversation…</p>}

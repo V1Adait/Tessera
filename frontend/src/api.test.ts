@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, fetchConversation, streamChat } from "./api";
+import { ApiError, deleteConversation, fetchConversation, fetchConversations, streamChat } from "./api";
 import type { StreamEvent } from "./types";
 
 const encoder = new TextEncoder();
@@ -177,5 +177,59 @@ describe("fetchConversation", () => {
     const error = await fetchConversation("c").catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).status).toBe(404);
+  });
+});
+
+describe("the chat history calls", () => {
+  const item = { id: "c1", title: "Palantir leverage", updated_at: "2026-10-17T11:00:00Z", message_count: 4 };
+
+  function reply(status: number, body?: unknown) {
+    const mock = vi.fn().mockResolvedValue(
+      new Response(body === undefined ? null : JSON.stringify(body), { status }),
+    );
+    vi.stubGlobal("fetch", mock);
+    return mock;
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("lists the workspace's chats", async () => {
+    const mock = reply(200, [item]);
+
+    const found = await fetchConversations("w1");
+
+    expect(found).toEqual([item]);
+    expect((mock.mock.calls[0] as unknown as [string])[0]).toMatch(/\/workspaces\/w1\/conversations$/);
+  });
+
+  it("refuses a list in the wrong shape", async () => {
+    reply(200, [{ id: "c1" }]);
+
+    await expect(fetchConversations("w1")).rejects.toThrow("unexpected shape");
+  });
+
+  it("turns a server error into an ApiError with the status", async () => {
+    reply(404, { detail: "workspace not found" });
+
+    const error = await fetchConversations("w1").catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(404);
+  });
+
+  it("deletes a chat with DELETE and resolves on 204", async () => {
+    const mock = reply(204);
+
+    await expect(deleteConversation("c1")).resolves.toBeUndefined();
+
+    const [url, init] = mock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/\/conversations\/c1$/);
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("rejects when the chat cannot be deleted", async () => {
+    reply(404);
+
+    await expect(deleteConversation("c1")).rejects.toBeInstanceOf(ApiError);
   });
 });

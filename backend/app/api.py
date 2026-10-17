@@ -19,7 +19,7 @@ from backend.app.api_agent import AgentDep
 from backend.app.config import Settings, get_settings
 from backend.app.db import repository as repo
 from backend.app.db.pool import get_pool
-from backend.app.db.records import StoredMessage
+from backend.app.db.records import ConversationSummary, StoredMessage
 from backend.app.llm import get_default_llm, get_summary_llm
 from backend.app.models import ChatInput
 from backend.app.sse import sse, sse_events, stream_headers
@@ -95,3 +95,22 @@ async def get_conversation(conversation_id: UUID, pool: PoolDep) -> Conversation
         title=conversation.title,
         messages=messages,
     )
+
+
+@router.get(
+    "/workspaces/{workspace_id}/conversations", response_model=list[ConversationSummary]
+)
+async def list_conversations(
+    workspace_id: UUID, pool: PoolDep
+) -> list[ConversationSummary]:
+    """The chat history of a workspace, newest first."""
+    if await repo.get_workspace(pool, workspace_id) is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return await repo.list_conversations(pool, workspace_id)
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(conversation_id: UUID, pool: PoolDep) -> None:
+    """Delete a conversation and its messages. Cannot be undone; the screen asks first."""
+    if not await repo.delete_conversation(pool, conversation_id):
+        raise HTTPException(status_code=404, detail="conversation not found")

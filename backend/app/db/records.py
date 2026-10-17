@@ -49,6 +49,15 @@ class ConversationRecord(BaseModel):
     updated_at: datetime
 
 
+class ConversationSummary(BaseModel):
+    """One line of the chat history: enough to recognise a conversation and open it."""
+
+    id: UUID
+    title: str | None
+    updated_at: datetime
+    message_count: int  # messages actually shown (the person's and the assistant's)
+
+
 class StoredMessage(BaseModel):
     id: UUID
     conversation_id: UUID
