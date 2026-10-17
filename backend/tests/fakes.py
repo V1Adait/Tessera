@@ -1,6 +1,7 @@
 """Shared test doubles: a fake model that streams like a real provider, and test settings."""
 
 import asyncio
+import json
 import math
 import re
 import zlib
@@ -281,3 +282,76 @@ class FakeSparse:
         if self.error is not None:
             raise self.error
         return self.vector(text, query=True)
+
+
+class ToolFake(BaseChatModel):
+    """A model that follows a script and can ask for tools, like a real tool-calling model.
+
+    Each item of `steps` is one model call:
+        "some text"                       -> a final answer
+        [("tool_name", {"arg": 1}), ...]  -> asks for those tools (no text)
+        ("some text", [("tool", {...})])  -> says something, then asks for tools
+        an Exception                      -> the call fails
+    When the script runs out it repeats the last item. Every prompt it was given is kept in `seen`.
+    """
+
+    steps: list[Any] = Field(default_factory=list)
+    seen: list[Any] = Field(default_factory=list)
+    tools_seen: list[Any] = Field(default_factory=list)
+    reported_cost: float | None = None
+    delay_s: float = 0.0
+
+    @property
+    def _llm_type(self) -> str:
+        return "tool-fake"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> ToolFake:  # type: ignore[override]
+        self.tools_seen = list(tools)
+        return self
+
+    def _generate(
+        self, messages: list[BaseMessage], *args: Any, **kwargs: Any
+    ) -> ChatResult:
+        raise NotImplementedError
+
+    async def _astream(
+        self, messages: list[BaseMessage], *args: Any, **kwargs: Any
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        self.seen.append(list(messages))
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        item = self.steps.pop(0) if len(self.steps) > 1 else self.steps[0]
+        if isinstance(item, Exception):
+            raise item
+        text, calls = "", []
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, tuple):
+            text, calls = item
+        else:
+            calls = item
+        if text:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+        chunks = [
+            {
+                "name": name,
+                "args": json.dumps(args),
+                "id": f"call_{i}_{len(self.seen)}",
+                "index": i,
+            }
+            for i, (name, args) in enumerate(calls)
+        ]
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="",
+                tool_call_chunks=chunks,  # type: ignore[arg-type]
+                usage_metadata=UsageMetadata(
+                    input_tokens=50, output_tokens=10, total_tokens=60
+                ),
+                response_metadata=(
+                    {"token_usage": {"cost": self.reported_cost}}
+                    if self.reported_cost is not None
+                    else {}
+                ),
+            )
+        )

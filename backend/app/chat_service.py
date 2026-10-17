@@ -20,6 +20,7 @@ import asyncpg
 from langchain_core.language_models import BaseChatModel
 
 from backend.app import pipeline
+from backend.app.agent.runtime import AgentRuntime
 from backend.app.config import Settings
 from backend.app.context import BuiltContext, estimate_tokens
 from backend.app.costs import Cost, get_price_book, resolve_cost
@@ -60,6 +61,7 @@ class Turn:
     """Everything stream_turn needs, prepared by begin_turn."""
 
     conversation_id: UUID
+    workspace_id: UUID
     request_id: UUID
     request: (
         ChatRequest  # the unsummarised history from the database + the new user message
@@ -92,6 +94,8 @@ async def begin_turn(
         except LookupError as exc:
             raise ConversationNotFoundError(str(conversation_id)) from exc
         summary, stored = await repo.load_history(conn, conversation_id)
+        conversation = await repo.get_conversation(conn, conversation_id)
+    assert conversation is not None
 
     messages = [
         Message(id=m.id, role=m.role, content=m.content)
@@ -100,6 +104,31 @@ async def begin_turn(
     ]
     return Turn(
         conversation_id=conversation_id,
+        workspace_id=conversation.workspace_id,
+        request_id=request_id,
+        request=ChatRequest(messages=messages),
+        summary=summary.content if summary else None,
+    )
+
+
+async def begin_followup_turn(
+    pool: asyncpg.Pool, conversation_id: UUID, request_id: UUID, text: str
+) -> Turn:
+    """A turn where the SYSTEM speaks last: `text` is sent to the model but not saved as a user
+    message (nobody typed it). Used to write an answer from data the system gathered."""
+    conversation = await repo.get_conversation(pool, conversation_id)
+    if conversation is None:
+        raise ConversationNotFoundError(str(conversation_id))
+    summary, stored = await repo.load_history(pool, conversation_id)
+    messages = [
+        Message(id=m.id, role=m.role, content=m.content)
+        for m in stored
+        if m.usable_in_prompt
+    ]
+    messages.append(Message(role="user", content=text))
+    return Turn(
+        conversation_id=conversation_id,
+        workspace_id=conversation.workspace_id,
         request_id=request_id,
         request=ChatRequest(messages=messages),
         summary=summary.content if summary else None,
@@ -112,6 +141,9 @@ async def stream_turn(
     llm: BaseChatModel,
     turn: Turn,
     summary_llm: BaseChatModel | None = None,
+    agent: AgentRuntime | None = None,
+    *,
+    system_extra: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
     started = time.perf_counter()
     first_token_ms: int | None = None
@@ -132,6 +164,17 @@ async def stream_turn(
             turn.request_id,
             on_context=on_context,
             summary=turn.summary,
+            system_extra=system_extra
+            if system_extra is not None
+            else (agent.system_extra if agent else None),
+            generate=agent.generator(
+                llm,
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                request_id=turn.request_id,
+            )
+            if agent
+            else None,
         ):
             if isinstance(event, Delta):
                 if first_token_ms is None:
@@ -152,6 +195,7 @@ async def stream_turn(
             crashed=crashed,
             latency_ms=round((time.perf_counter() - started) * 1000),
             first_token_ms=first_token_ms,
+            traced_per_call=agent is not None,
         )
         task = _spawn(_after_turn(pool, settings, turn, outcome, summary_llm))
         # Shield: if this request is being cancelled, the recording keeps running anyway.
@@ -201,6 +245,7 @@ class _Outcome:
     crashed: bool
     latency_ms: int
     first_token_ms: int | None
+    traced_per_call: bool = False  # the agent traced each model call itself
 
 
 def _turn_cost(settings: Settings, done: Done | None, text: str) -> Cost | None:
@@ -268,25 +313,26 @@ async def _record(
                     tokens_dropped=trim.tokens_dropped,
                     dropped_through_message_id=trim.dropped_through_message_id,
                 )
-            await repo.record_trace(
-                conn,
-                TraceRecord(
-                    request_id=turn.request_id,
-                    conversation_id=turn.conversation_id,
-                    kind="chat",
-                    status=trace_status,
-                    provider=settings.provider,
-                    model=settings.default_model,
-                    prompt_version=PROMPT_VERSION,
-                    tokens_in=done.usage.tokens_in if done else None,
-                    tokens_out=done.usage.tokens_out if done else None,
-                    cost_usd=cost.usd if cost else None,
-                    cost_source=cost.source if cost else None,
-                    latency_ms=outcome.latency_ms,
-                    first_token_ms=outcome.first_token_ms,
-                    error_code=error_code,
-                ),
-            )
+            if not outcome.traced_per_call:
+                await repo.record_trace(
+                    conn,
+                    TraceRecord(
+                        request_id=turn.request_id,
+                        conversation_id=turn.conversation_id,
+                        kind="chat",
+                        status=trace_status,
+                        provider=settings.provider,
+                        model=settings.default_model,
+                        prompt_version=PROMPT_VERSION,
+                        tokens_in=done.usage.tokens_in if done else None,
+                        tokens_out=done.usage.tokens_out if done else None,
+                        cost_usd=cost.usd if cost else None,
+                        cost_source=cost.source if cost else None,
+                        latency_ms=outcome.latency_ms,
+                        first_token_ms=outcome.first_token_ms,
+                        error_code=error_code,
+                    ),
+                )
     except Exception:
         logger.exception(
             "failed to record the turn", extra={"request_id": str(turn.request_id)}

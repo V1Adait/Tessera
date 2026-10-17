@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from uuid import UUID, uuid4
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
 
 from backend.app.config import Settings
 from backend.app.context import BuiltContext, ContextTooLargeError, assemble_context
@@ -43,12 +44,16 @@ async def run(
     request_id: UUID | None = None,
     on_context: Callable[[BuiltContext], None] | None = None,
     summary: str | None = None,
+    system_extra: str | None = None,
+    generate: Callable[[list[BaseMessage]], AsyncIterator[StreamEvent]] | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """ChatRequest in, a stream of Delta events then one Done (or one ErrorEvent) out.
 
     The llm and settings come in as arguments, not fetched here, so tests can pass fakes.
     `on_context` is told what was sent (and what was trimmed) once the prompt is built, so a
     caller can record it without the pipeline knowing about databases.
+    `generate`, when given, replaces the plain model call: the agent uses it to run its tool loop
+    on the same finished prompt. `system_extra` adds rules to the system prompt (the agent's).
     Failures end the stream with an ErrorEvent; they never raise to the caller.
     """
     request_id = request_id or uuid4()
@@ -56,7 +61,9 @@ async def run(
     check_input(request, settings)
 
     try:
-        built = assemble_context(request, settings, summary=summary)
+        built = assemble_context(
+            request, settings, summary=summary, system_extra=system_extra
+        )
     except ContextTooLargeError:
         logger.warning("context too large", extra={"request_id": str(request_id)})
         yield ErrorEvent(
@@ -80,5 +87,10 @@ async def run(
     if on_context is not None:
         on_context(built)
 
-    async for event in stream_chat(built.messages, llm, request_id):
+    events = (
+        generate(built.messages)
+        if generate is not None
+        else stream_chat(built.messages, llm, request_id)
+    )
+    async for event in events:
         yield check_output(event)

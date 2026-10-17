@@ -109,8 +109,12 @@ def trim_history(history: list[Message], budget: int) -> list[Message]:
     return kept
 
 
-def _system_text(profile: str | None, summary: str | None) -> str:
+def _system_text(
+    profile: str | None, summary: str | None, extra: str | None = None
+) -> str:
     parts = [SYSTEM_PROMPT]
+    if extra:
+        parts.append(extra)
     if profile:
         parts.append(f"<profile>\n{profile}\n</profile>")
     if summary:
@@ -147,6 +151,7 @@ def assemble_context(
     summary: str | None = None,
     documents: str | None = None,
     summarised_through: UUID | None = None,
+    system_extra: str | None = None,
 ) -> BuiltContext:
     """Assemble the final prompt and report any trimming. `request.system` is ignored:
     only the server's prompt counts."""
@@ -155,7 +160,7 @@ def assemble_context(
         raise ValueError("the last message must be from the user")
     history = messages_since(history, summarised_through)
 
-    system_text = _system_text(profile, summary)
+    system_text = _system_text(profile, summary, system_extra)
     new_text = (
         f"<documents>\n{documents}\n</documents>\n\n{new.content}"
         if documents
