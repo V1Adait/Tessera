@@ -101,11 +101,6 @@ Not published yet. This project reports only numbers that its eval harness produ
 - Wording of model answers varies from run to run. Values, quotes and checks do not come from that wording.
 - Tool steps shown while the agent works are not kept after a page reload.
 
-## Status and roadmap
-
-Built: chat with context management, ingestion, hybrid retrieval, verified extraction, matrix runs with estimate and caps, result cache, tracing, intake, agent loop with confirmations, domain pack, plan card, finance layer, grid UI, PDF export, chat history.
-
-Next: finance eval over real filings, one-command Docker setup, Excel export. Possible later: EDGAR ingest by ticker, bank and fintech packs, a CI gate on the eval.
 
 ## Data
 
