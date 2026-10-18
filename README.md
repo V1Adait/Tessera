@@ -61,6 +61,15 @@ flowchart LR
 
 Python 3.14, FastAPI, Pydantic v2, asyncpg and Postgres, Qdrant, fastembed (BM25), LangChain model adapters, OpenRouter, pytest, ruff, mypy. React 19, TypeScript, Vite, Tailwind, TanStack Table, vitest.
 
+## Run it with Docker
+
+```bash
+cp .env.example .env        # set OPENROUTER_API_KEY (the compose file supplies the database settings)
+docker compose up --build
+```
+
+Then open http://localhost:5173. Compose starts Postgres, Qdrant, the API (which applies the migrations on start) and the web app. Data is kept in named volumes, so it survives a restart; `docker compose down -v` wipes it.
+
 ## Run it locally
 
 Requirements: Python 3.14 with [uv](https://docs.astral.sh/uv/), Node 20+, Postgres, an OpenRouter key.
@@ -81,6 +90,23 @@ cd frontend && npm install && npm run dev      # http://localhost:5173
 
 Vectors live in a local folder (`data/qdrant`) unless `QDRANT_URL` is set.
 
+## Design decisions
+
+Each entry: what was chosen, what it was chosen over, and why.
+
+- **Finance only, PE and credit diligence first.** Over a multi-industry tool. Typed finance questions let correctness be checked in code (periods, units, tie-outs). Generic questions can only be judged by reading. Other uses (bank, fintech) come as data packs, not new logic.
+- **The model proposes, code decides.** The model suggests a value, a quote, a period or a column. Code verifies the quote against the source text, parses the scale, checks that the period appears in the text, and validates the plan. Over trusting structured output: a well-formed answer can still be wrong.
+- **Derived numbers are computed in code.** Net debt, margins, growth and coverage are formulas over other cells, with the inputs' quotes attached. Over asking the model: arithmetic from a model is not reproducible, and a mixed-period or mixed-currency input must be refused, not averaged.
+- **Tie-outs are visible, not silent.** A failed check (such as gross profit versus revenue minus cost) is shown on the cell with the gap. Over hiding it or auto-correcting: companies define some figures differently, and the reader should see that.
+- **`not applicable` and `not found` are different statuses.** One means the question does not apply to the company. The other means it applies and the documents do not answer it. Merging them would make an absent answer look like a negative one.
+- **Hybrid retrieval, Postgres plus Qdrant.** Dense vectors and BM25 are fused with reciprocal rank fusion, over vectors alone. Filings are full of exact terms (line-item names, defined terms) that keyword search finds and embeddings blur. Postgres stays the source of truth and Qdrant is an index.
+- **A hand-written agent loop with hard limits, not an agent framework.** Steps, time and cost are capped in code, and the tools are few. Over a graph framework: the loop is small enough to read in one sitting, and the limits are enforced by code that is easy to test. LangChain is used only for the model adapters.
+- **Confirmations are stored.** A costly or destructive action becomes a pending record in Postgres that the user approves, so a confirmation survives a refresh and cannot be replayed twice. Over a prompt the model is asked to respect.
+- **Document text is data.** It is fenced into its own slot and can never trigger a tool call. A filing that says "ignore your instructions" is just text.
+- **Cost is shown before it is spent.** A plan card states an estimate and a stop limit. Identical model calls are cached, and every call is traced with tokens, cost and latency.
+- **Privacy defaults.** Company logos are off by default, because fetching one sends the company's domain to a third-party favicon service. A reviewer researching a private deal should not leak a name by accident.
+- **PDF export built in code.** With reportlab and standard fonts, over printing the web page, so the Sources appendix and the quotes are laid out the same every time.
+
 ## Tests
 
 ```bash
@@ -92,7 +118,22 @@ The full backend suite is slow (over ten minutes), so run the files for the area
 
 ## Evaluation
 
-Not published yet. This project reports only numbers that its eval harness produced, so there are no accuracy figures here. Harnesses exist for routing, retrieval, parsing and extraction under [eval/](eval/). The finance eval over real SEC filings is the next step, and its results and a written failure analysis will go in this section.
+The finance eval runs the real pipeline (parse, chunk, retrieve, extract, verify, compute, tie out) on one 10-K each for Apple, Microsoft, NVIDIA, Palantir, Salesforce and Walmart, and scores every cell against the XBRL numbers each company filed. The labels are not typed by hand and not produced by a model. Every figure below comes from the harness: [report](eval/finance/REPORT.md), [failure analysis](eval/finance/FAILURE_ANALYSIS.md).
+
+| Extracted values (50 scored) | |
+|---|---|
+| Exactly correct | 36 |
+| Within 0.5%, from a rounded figure in the text | 3 |
+| Wrong value | 3 |
+| Cell refused to answer | 8 |
+
+- **No invented numbers.** Of 64 quotes checked against the document text, 0 failed, and no answered cell lacked a quote. The three wrong values are real figures from the filing that sit on a different line than the question meant (consolidated rather than attributable net income, interest net of income rather than gross).
+- **Computed cells:** operating margin and net margin were correct 6 of 12 times. The five misses came from an input that was missing, unreliable or from a different period, and the one wrong value from a wrong input. The code refused instead of mixing periods.
+- **Periods:** 43 of 44 answered cells carry the filing's fiscal year.
+- **Largest loss:** Microsoft, where a parser check on table totals flagged the tables and six of eleven cells were refused. It is the first thing to investigate.
+- **Cost:** $0.08 for all six filings (77 model calls, 0 errors).
+
+Read these as patterns, not precise rates: six filings, one run, one model, and no repeats. Free cash flow, gross margin and free cash flow margin are not scored, because companies define them themselves and XBRL has no gold for them. Reproduce with `eval/finance/fetch.py` and `eval/finance/run_eval.py`. Earlier harnesses for routing, retrieval and parsing are under [eval/](eval/).
 
 ## Known limits
 

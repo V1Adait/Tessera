@@ -1,0 +1,49 @@
+# One command:  docker compose up --build      then open http://localhost:5173
+# Needs a .env file next to this one with OPENROUTER_API_KEY=... (see .env.example).
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: tessera
+      POSTGRES_PASSWORD: tessera
+      POSTGRES_DB: tessera
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tessera -d tessera"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrantdata:/qdrant/storage
+
+  backend:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in .env}
+      DATABASE_URL: postgresql://tessera:tessera@postgres:5432/tessera
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - appdata:/app/data
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80" # 5173 is the origin the backend allows
+
+volumes:
+  pgdata:
+  qdrantdata:
+  appdata:

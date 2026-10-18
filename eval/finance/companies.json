@@ -1,0 +1,8 @@
+[
+  {"ticker": "AAPL", "name": "Apple Inc."},
+  {"ticker": "MSFT", "name": "Microsoft Corporation"},
+  {"ticker": "NVDA", "name": "NVIDIA Corporation"},
+  {"ticker": "PLTR", "name": "Palantir Technologies Inc."},
+  {"ticker": "CRM", "name": "Salesforce, Inc."},
+  {"ticker": "WMT", "name": "Walmart Inc."}
+]
