@@ -5,3 +5,9 @@ __pycache__/
 notes/api.py 
 # uploaded documents (content-addressed files live here)
 data/
+
+# private project notes (kept locally, not published)
+claude.md
+CLAUDE.md
+docs/decisions.md
+docs/DECISIONS.md
